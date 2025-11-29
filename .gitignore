@@ -1,0 +1,8 @@
+*.json
+*.pt
+*.pkl
+*.txt
+*.gz
+checkpoints/
+wandb/
+*.pyc
