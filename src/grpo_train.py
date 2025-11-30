@@ -13,20 +13,19 @@ import json
 from datetime import datetime
 from pathlib import Path
 from typing import List, Dict
-import numpy as np
 
 from trl import GRPOTrainer, GRPOConfig
+from trl.extras.profiling import profiling_decorator, profiling_context
+
 from transformers import AutoTokenizer, AutoModelForCausalLM
-from torch.utils.data import DataLoader
 
 from train_utils.reward_funtion import RecRewardFrunction
 from train_utils.dataset import create_dataloaders
 
 from accelerate import logging
-from trl.extras.profiling import profiling_decorator, profiling_context
-from trl.data_utils import is_conversational
-from torch import nn
 from accelerate.utils import gather
+
+
 
 logger = logging.get_logger(__name__)
 
@@ -82,7 +81,6 @@ class GRPOTrainerRecReward(GRPOTrainer):
         rewards_per_func = gather(rewards_per_func)
         return rewards_per_func
 
-
 class GRPOTrainerWrapper:
     """
     TRL GRPO를 활용한 추천 시스템 학습기
@@ -110,17 +108,6 @@ class GRPOTrainerWrapper:
             trust_remote_code=True,
         )
         
-        # Reference 모델 (GRPO에서는 optional)
-        # self.ref_model = None
-        # if args.use_ref_model:
-        #     print(f"📖 Loading reference model...")
-        #     self.ref_model = AutoModelForCausalLM.from_pretrained(
-        #         args.policy_model,
-        #         dtype=torch.bfloat16 if args.device.startswith("cuda") else torch.float32,
-        #         device=args.device,
-        #     )
-        #     self.ref_model.eval()
-        
         # GRPO Config
         grpo_config = GRPOConfig(
             output_dir=args.checkpoint_dir,
@@ -129,6 +116,7 @@ class GRPOTrainerWrapper:
             gradient_accumulation_steps=args.gradient_accumulation_steps,
             learning_rate=args.learning_rate,
             logging_steps=args.log_interval,
+            eval_steps=args.eval_interval,
             save_steps=args.save_interval,
             save_total_limit=args.save_total_limit,
             max_grad_norm=args.max_grad_norm,
@@ -140,6 +128,7 @@ class GRPOTrainerWrapper:
             num_generations=args.num_sample_generations,
             temperature=args.temperature,
             max_completion_length=args.max_new_tokens,
+            include_for_metrics=["reward", "entropy", "grad_norm", "epoch"]
         )
         
         # GRPO Trainer
@@ -175,166 +164,6 @@ class GRPOTrainerWrapper:
             processing_class=self.tokenizer,
         )
     
-    # def train_step(self, batch, step: int) -> Dict[str, float]:
-    #     """
-    #     한 스텝의 학습 수행
-        
-    #     Args:
-    #         batch: 배치 데이터
-    #         step: 현재 스텝 번호
-        
-    #     Returns:
-    #         학습 통계 딕셔너리
-    #     """
-    #     queries = batch["queries"]
-        
-    #     # 1. 토크나이즈
-    #     query_tensors = self.tokenizer(
-    #         queries,
-    #         return_tensors="pt",
-    #         padding=True,
-    #         truncation=True,
-    #         max_length=self.args.max_length,
-    #     ).input_ids.to(self.args.device)
-        
-    #     # 2. 생성 (GRPO는 내부적으로 여러 샘플 생성)
-    #     # num_sample_generations 만큼 각 query에 대해 생성
-    #     generated_outputs = []
-    #     response_tensors = []
-        
-    #     for query_tensor in query_tensors:
-    #         query_tensor = query_tensor.unsqueeze(0)
-            
-    #         # 여러 샘플 생성
-    #         gen_outputs = self.model.generate(
-    #             query_tensor,
-    #             max_new_tokens=self.args.max_new_tokens,
-    #             do_sample=True,
-    #             temperature=self.args.temperature,
-    #             num_return_sequences=self.args.num_sample_generations,
-    #             pad_token_id=self.tokenizer.pad_token_id,
-    #             eos_token_id=self.tokenizer.eos_token_id,
-    #         )
-            
-    #         generated_outputs.extend(gen_outputs)
-    #         response_tensors.extend([out[len(query_tensor[0]):] for out in gen_outputs])
-        
-    #     # 3. 디코딩
-    #     generated_texts = self.tokenizer.batch_decode(
-    #         generated_outputs,
-    #         skip_special_tokens=True
-    #     )
-        
-    #     # 프롬프트 제거
-    #     generated_only = []
-    #     for i, text in enumerate(generated_texts):
-    #         query_idx = i // self.args.num_sample_generations
-    #         query = queries[query_idx]
-    #         if query in text:
-    #             gen_part = text[len(query):].strip()
-    #         else:
-    #             gen_part = text.strip()
-    #         generated_only.append(gen_part)
-        
-    #     # 4. 리워드 계산
-    #     rewards = self.compute_rewards(batch, generated_only)
-        
-    #     # 5. GRPO 업데이트
-    #     # GRPOTrainer의 step 메서드 호출
-    #     stats = self.grpo_trainer.step(
-    #         queries=query_tensors,
-    #         responses=torch.stack(response_tensors),
-    #         scores=rewards,
-    #     )
-        
-    #     # 6. 추가 통계
-    #     stats["step"] = step
-    #     stats["mean_reward"] = rewards.mean().item()
-    #     stats["std_reward"] = rewards.std().item()
-    #     stats["max_reward"] = rewards.max().item()
-    #     stats["min_reward"] = rewards.min().item()
-        
-    #     return stats
-    
-    # def evaluate(self, dataloader: DataLoader, split: str = "valid") -> Dict[str, float]:
-    #     """
-    #     평가 수행
-        
-    #     Args:
-    #         dataloader: 평가용 dataloader
-    #         split: 데이터 분할 이름
-        
-    #     Returns:
-    #         평가 메트릭 딕셔너리
-    #     """
-    #     print(f"\n📊 Evaluating on {split} set...")
-        
-    #     self.model.eval()
-    #     all_rewards = []
-        
-    #     with torch.no_grad():
-    #         for batch in dataloader:
-    #             queries = batch["queries"]
-                
-    #             # 토크나이즈
-    #             query_tensors = self.tokenizer(
-    #                 queries,
-    #                 return_tensors="pt",
-    #                 padding=True,
-    #                 truncation=True,
-    #                 max_length=self.args.max_length,
-    #             ).input_ids.to(self.args.device)
-                
-    #             # 생성 (평가 시에는 1개만)
-    #             generated_outputs = self.model.generate(
-    #                 query_tensors,
-    #                 max_new_tokens=self.args.max_new_tokens,
-    #                 do_sample=False,  # Greedy decoding
-    #                 pad_token_id=self.tokenizer.pad_token_id,
-    #                 eos_token_id=self.tokenizer.eos_token_id,
-    #             )
-                
-    #             # 디코딩
-    #             generated_texts = self.tokenizer.batch_decode(
-    #                 generated_outputs,
-    #                 skip_special_tokens=True
-    #             )
-                
-    #             # 프롬프트 제거
-    #             generated_only = []
-    #             for i, text in enumerate(generated_texts):
-    #                 query = queries[i]
-    #                 if query in text:
-    #                     gen_part = text[len(query):].strip()
-    #                 else:
-    #                     gen_part = text.strip()
-    #                 generated_only.append(gen_part)
-                
-    #             # 리워드 계산
-    #             rewards = self.reward_fn(
-    #                 generated_texts=generated_only,
-    #                 target_items=batch["targets"],
-    #                 history_items=batch["histories"],
-    #             )
-                
-    #             all_rewards.extend(rewards.cpu().numpy())
-        
-    #     self.model.train()
-        
-    #     # 메트릭 계산
-    #     metrics = {
-    #         f"{split}/mean_reward": np.mean(all_rewards),
-    #         f"{split}/std_reward": np.std(all_rewards),
-    #         f"{split}/max_reward": np.max(all_rewards),
-    #         f"{split}/min_reward": np.min(all_rewards),
-    #     }
-        
-    #     print(f"✓ {split.upper()} Evaluation:")
-    #     for key, value in metrics.items():
-    #         print(f"  {key}: {value:.4f}")
-        
-    #     return metrics
-    
     def train(self):
         """
         전체 학습 루프 실행
@@ -347,71 +176,6 @@ class GRPOTrainerWrapper:
         best_reward = -float('inf')
 
         self.grpo_trainer.train()
-        
-        # for epoch in range(self.args.num_epochs):
-        #     print(f"\n📅 Epoch {epoch + 1}/{self.args.num_epochs}")
-            
-        #     epoch_rewards = []
-            
-        #     for batch_idx, batch in enumerate(self.train_dataloader):
-        #         try:
-        #             # 학습 스텝
-        #             stats = self.train_step(batch, global_step)
-        #             epoch_rewards.append(stats["mean_reward"])
-                    
-        #             # 로깅
-        #             if global_step % self.args.log_interval == 0:
-        #                 print(
-        #                     f"Step {global_step:6d} | "
-        #                     f"Epoch {epoch+1} Batch {batch_idx:4d} | "
-        #                     f"Reward: {stats['mean_reward']:.4f} ± {stats['std_reward']:.4f} | "
-        #                     f"Loss: {stats.get('loss', 0.0):.4f}"
-        #                 )
-                    
-        #             # 검증 평가
-        #             if global_step > 0 and global_step % self.args.eval_interval == 0:
-        #                 valid_metrics = self.evaluate(self.valid_dataloader, split="valid")
-                        
-        #                 # Best 모델 저장
-        #                 valid_reward = valid_metrics["valid/mean_reward"]
-        #                 if valid_reward > best_reward:
-        #                     best_reward = valid_reward
-        #                     best_path = self.checkpoint_dir / "checkpoint_best"
-        #                     self.model.save_pretrained(best_path)
-        #                     self.tokenizer.save_pretrained(best_path)
-        #                     print(f"🏆 Best model saved: {best_path} (reward: {best_reward:.4f})")
-                    
-        #             # 체크포인트 저장
-        #             if global_step > 0 and global_step % self.args.save_interval == 0:
-        #                 checkpoint_path = self.checkpoint_dir / f"checkpoint_step_{global_step}"
-        #                 self.model.save_pretrained(checkpoint_path)
-        #                 self.tokenizer.save_pretrained(checkpoint_path)
-        #                 print(f"💾 Checkpoint saved: {checkpoint_path}")
-                    
-        #             global_step += 1
-                    
-        #             if global_step >= self.args.max_steps:
-        #                 break
-                
-        #         except KeyboardInterrupt:
-        #             print("\n⚠️  Training interrupted by user")
-        #             break
-        #         except Exception as e:
-        #             print(f"\n❌ Error at step {global_step}: {e}")
-        #             if self.args.debug:
-        #                 raise e
-        #             continue
-            
-        #     # Epoch 종료 평가
-        #     print(f"\n📊 Epoch {epoch + 1} Summary:")
-        #     avg_epoch_reward = np.mean(epoch_rewards) if epoch_rewards else 0.0
-        #     print(f"  Train Average Reward: {avg_epoch_reward:.4f}")
-            
-        #     # Valid 평가
-        #     valid_metrics = self.evaluate(self.valid_dataloader, split="valid")
-            
-        #     if global_step >= self.args.max_steps:
-        #         break
         
         # 최종 테스트 평가
         print("\n" + "=" * 80)

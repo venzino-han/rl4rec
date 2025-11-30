@@ -195,6 +195,7 @@ class RecRewardFrunction:
             k: Top-K 값
             normalize: 리워드 정규화 여부
         """
+        self.__name__ = "RecRewardFrunction"
         self.retrieval_service_name = retrieval_service_name
         self.namespace = namespace
         self.dataset_name = dataset_name
@@ -215,9 +216,6 @@ class RecRewardFrunction:
                 f"Make sure retrieval service is running."
             ) from e
     
-    def __name__(self):
-        return "RecRewardFrunction"
-
     def __call__(
         self,
         generated_texts: List[str],
