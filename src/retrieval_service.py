@@ -58,7 +58,7 @@ class RetrievalService:
                 emb_file = f"data_emb/{name}_{self.args.emb_type}_{self.args.emb_model_name_dir}.pt"
                 print(f"  Loading: {emb_file}")
                 emb = torch.load(emb_file, map_location=self.device)
-                indices[name] = emb
+                indices[name] = emb / emb.norm(dim=-1, keepdim=True)
                 print(f"  Loaded dataset '{name}': {emb.shape}")
         
         return indices
@@ -79,17 +79,21 @@ class RetrievalService:
         # print(outputs)
         return outputs
 
-    def calculate_reward(self, texts, dataset_name, debug=False):
+    def calculate_reward(self, texts, dataset_name, targets=None, neg_items=None, debug=False):
         """
-        전체 인덱스에 대한 스코어 배열 계산
+        전체 인덱스 또는 지정된 아이템들에 대한 스코어 배열 계산
         
         Args:
             texts (List[str]): 임베딩할 텍스트 리스트
             dataset_name (str): 사용할 데이터셋 이름 (필수)
+            targets (List[int], optional): 타겟 아이템 ID 리스트 [batch_size]
+            neg_items (List[List[int]], optional): 배치별 negative 아이템 ID 리스트 [batch_size, num_negs]
+            debug (bool): 디버깅 모드
         
         Returns:
-            torch.Tensor: 스코어 배열 [len(texts), index_size] (CPU로 반환)
-                         각 텍스트에 대한 전체 인덱스와의 유사도 스코어
+            torch.Tensor: 스코어 배열
+                - targets/neg_items가 None인 경우: [len(texts), index_size] 전체 인덱스와의 유사도
+                - targets/neg_items가 제공된 경우: [len(texts), 1 + num_negs] target + negatives에 대한 유사도
         """
         if dataset_name not in self.reference_indices:
             raise ValueError(f"Dataset '{dataset_name}' not found. Available: {list(self.reference_indices.keys())}")
@@ -115,12 +119,34 @@ class RetrievalService:
 
         # query_embeddings = self.st_model.encode(texts, show_progress_bar=debug, convert_to_tensor=True)
         
-        # 2. GPU에서 전체 인덱스와의 유사도 계산
+        # 2. GPU에서 유사도 계산
         reference_index = self.reference_indices[dataset_name]
-        scores = torch.matmul(query_embeddings, reference_index.T)  # [len(texts), index_size]
+
+        # cosine similarity
+        query_embeddings = query_embeddings / query_embeddings.norm(dim=-1, keepdim=True)
         
-        # 3. CPU로 이동하여 반환 (통신 비용 최소화)
-        return scores.cpu()
+        # 3. targets와 neg_items가 제공되었는지 확인
+        if targets is not None and neg_items is not None:
+            # target + negatives에 대해서만 스코어 계산
+            batch_size = len(texts)
+            num_negs = len(neg_items[0]) if neg_items else 0
+            
+            # 결과 텐서 초기화 [batch_size, 1 + num_negs]
+            scores = torch.zeros(batch_size, 1 + num_negs, device=self.device)
+            
+            for i in range(batch_size):
+                # 각 샘플별로 target + negatives 인덱싱
+                item_indices = [targets[i]] + neg_items[i]
+                item_embeddings = reference_index[item_indices]  # [1 + num_negs, emb_dim]
+                
+                # 해당 아이템들과의 유사도 계산
+                scores[i] = torch.matmul(query_embeddings[i], item_embeddings.T)  # [1 + num_negs]
+            
+            return scores
+        else:
+            # 전체 인덱스와의 유사도 계산 (기존 동작)
+            scores = torch.matmul(query_embeddings, reference_index.T)
+            return scores
     
 # 서버 실행 코드
 if __name__ == "__main__":

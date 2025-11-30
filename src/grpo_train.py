@@ -246,6 +246,7 @@ def parse_args():
                         choices=["ndcg", "hit", "mrr", "mixed"])
     parser.add_argument("--k", type=int, default=100, help="Top-K for metrics")
     parser.add_argument("--normalize_rewards", action="store_true", help="Normalize rewards")
+    parser.add_argument("--num_negs", type=int, default=0, help="Number of negative items")
     
     # Logging & Checkpointing
     parser.add_argument("--checkpoint_dir", type=str, default="checkpoints/grpo")

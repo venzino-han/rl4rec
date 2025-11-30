@@ -75,7 +75,6 @@ class PromptGenerator:
             item_brand = item_data.get('brand', 'Unknown Brand')
             item_categories = item_data.get('category', 'Unknown Category')
             item_description = item_data.get('description', '')
-            item_features = item_data.get('features', '')
             
             # 기본 히스토리 포맷
             item_history_text = f"**Title:** `{item_title}`"
@@ -140,19 +139,41 @@ class RecommendationDataset(Dataset):
         item_metadata: Dict,
         prompt_generator: PromptGenerator,
         split: str = "train",
+        num_negs: int = 0,
+        num_items: Optional[int] = None,
     ):
         """
         Args:
-            sequential_file: 시퀀셜 데이터 파일 경로 (user_id history target)
+            data_name: 데이터셋 이름
             item_metadata: 아이템 메타데이터 딕셔너리
             prompt_generator: 프롬프트 생성기
             split: 데이터 분할 ("train", "valid", "test")
+            num_negs: 사전 샘플링할 negative 아이템 수 (0이면 비활성화)
+            num_items: 전체 아이템 수 (negative sampling에 필요)
         """
         self.item_metadata = item_metadata
         self.prompt_generator = prompt_generator
         self.split = split
+        self.num_negs = num_negs
+        self.num_items = num_items
+        
         sequential_file = f"data/{data_name}/sequential_data.txt"
         self._load_real_data(sequential_file, split)
+        
+        # 프롬프트 미리 생성 (초기화 시점)
+        print(f"✍️  Pre-generating prompts for {len(self.user_ids)} users...")
+        self.prompt_dict = {}
+        for user_id in self.user_ids:
+            history = self.history_dict[user_id]
+            self.prompt_dict[user_id] = self.prompt_generator.generate_prompt(history)
+        
+        # Negative items 미리 샘플링 (초기화 시점)
+        self.neg_items_dict = {}
+        if self.num_negs > 0:
+            if self.num_items is None:
+                raise ValueError("num_items must be provided when num_negs > 0")
+            print(f"🎲 Pre-sampling {self.num_negs} negative items for each user...")
+            self._sample_negative_items()
         
         print(f"✓ {split.upper()} Dataset loaded: {len(self.user_ids)} users")
     
@@ -190,6 +211,30 @@ class RecommendationDataset(Dataset):
         self.history_dict = all_history
         self.target_dict = all_targets
     
+    def _sample_negative_items(self):
+        """각 사용자별로 negative items 사전 샘플링"""
+        rng = np.random.RandomState(42)  # 재현성을 위한 고정 seed
+        
+        for user_id in self.user_ids:
+            history = self.history_dict[user_id]
+            target = self.target_dict[user_id]
+            
+            # 제외할 아이템 (history + target)
+            excluded = set(history + [target])
+            
+            # 가능한 negative items (전체 아이템 - 제외 아이템)
+            all_items = set(range(self.num_items))
+            candidate_items = list(all_items - excluded)
+            
+            # 랜덤 샘플링
+            if len(candidate_items) >= self.num_negs:
+                neg_items = rng.choice(candidate_items, size=self.num_negs, replace=False).tolist()
+            else:
+                # 후보가 부족한 경우 중복 샘플링
+                neg_items = rng.choice(candidate_items, size=self.num_negs, replace=True).tolist()
+            
+            self.neg_items_dict[user_id] = neg_items
+    
     def __len__(self):
         return len(self.user_ids)
     
@@ -198,15 +243,21 @@ class RecommendationDataset(Dataset):
         history = self.history_dict[user_id]
         target = self.target_dict[user_id]
         
-        # 프롬프트 생성
-        prompt = self.prompt_generator.generate_prompt(history)
+        # 미리 생성된 프롬프트 사용
+        prompt = self.prompt_dict[user_id]
         
-        return {
+        result = {
             "prompt": prompt,
             "history": history,
             "target": target,
             "user_id": user_id,
         }
+        
+        # Negative items가 있으면 추가
+        if self.num_negs > 0:
+            result["neg_items"] = self.neg_items_dict[user_id]
+        
+        return result
 
 
 def collate_fn(batch):
@@ -276,6 +327,15 @@ def create_dataloaders(
     print(f"📦 Loading item metadata...")
     item_metadata = load_item_metadata(args.dataset_name)
     
+    # num_items 가져오기 (args에 있으면 사용, 없으면 메타데이터에서 추출)
+    num_items = getattr(args, 'num_items', None)
+    if num_items is None and len(item_metadata) > 0:
+        num_items = max(item_metadata.keys()) + 1
+        print(f"  Inferred num_items from metadata: {num_items}")
+    
+    # num_negs 가져오기 (args에 있으면 사용, 없으면 0)
+    num_negs = getattr(args, 'num_negs', 0)
+    
     # 프롬프트 생성기
     print(f"✍️  Creating prompt generator...")
     prompt_generator = PromptGenerator(
@@ -296,6 +356,8 @@ def create_dataloaders(
         item_metadata=item_metadata,
         prompt_generator=prompt_generator,
         split="train",
+        num_negs=num_negs,
+        num_items=num_items,
     )
     
     # Valid dataset
@@ -304,6 +366,8 @@ def create_dataloaders(
         item_metadata=item_metadata,
         prompt_generator=prompt_generator,
         split="valid",
+        num_negs=num_negs,
+        num_items=num_items,
     )
     
     # Test dataset
@@ -312,6 +376,8 @@ def create_dataloaders(
         item_metadata=item_metadata,
         prompt_generator=prompt_generator,
         split="test",
+        num_negs=num_negs,
+        num_items=num_items,
     )
     
     # DataLoaders
@@ -342,6 +408,8 @@ def create_dataloaders(
     print(f"  Train samples: {len(train_dataset)}")
     print(f"  Valid samples: {len(valid_dataset)}")
     print(f"  Test samples: {len(test_dataset)}")
+    if num_negs > 0:
+        print(f"  Negative samples per user: {num_negs}")
     
     return train_dataset, valid_dataset, test_dataset, prompt_generator, item_metadata
     # return train_dataloader, valid_dataloader, test_dataloader, prompt_generator, item_metadata
