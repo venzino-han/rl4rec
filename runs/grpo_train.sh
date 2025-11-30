@@ -21,16 +21,16 @@
 # export PYTHONPATH="${PYTHONPATH}:$(pwd)/src"
 
 # 학습 실행
-CUDA_VISIBLE_DEVICES=1 python3 src/grpo_train.py \
+CUDA_VISIBLE_DEVICES=7 python3 src/grpo_train.py \
     --policy_model "google/gemma-3-1b-it" \
     --dataset_name "beauty" \
     --sequential_file "data/beauty/sequential_data.txt" \
     --reward_type "mixed" \
     --k 100 \
-    --batch_size 2 \
-    --num_sample_generations 2 \
-    --gradient_accumulation_steps 4 \
-    --learning_rate 1e-5 \
+    --batch_size 32 \
+    --num_sample_generations 4 \
+    --gradient_accumulation_steps 1 \
+    --learning_rate 5e-5 \
     --num_epochs 3 \
     --max_steps 10000 \
     --max_length 512 \

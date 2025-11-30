@@ -489,7 +489,7 @@ def parse_args():
     parser.add_argument("--eval_interval", type=int, default=100)
     parser.add_argument("--save_interval", type=int, default=500)
     parser.add_argument("--save_total_limit", type=int, default=3)
-    parser.add_argument("--report_to", type=str, default="none", 
+    parser.add_argument("--report_to", type=str, default="wandb", 
                         help="Logging backend (wandb, tensorboard, none)")
     parser.add_argument("--run_name", type=str, default=None)
     

@@ -190,7 +190,7 @@ if __name__ == "__main__":
     
     # Ray 초기화
     ray.init(
-        address=args.ray_address, 
+        # address=args.ray_address, 
         namespace=args.namespace,
         )
     
