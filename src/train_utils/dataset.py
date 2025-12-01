@@ -18,12 +18,50 @@ from torch.utils.data import Dataset, DataLoader
 class PromptGenerator:
     """
     사용자 시퀀스로부터 프롬프트를 생성하는 클래스
+    
+    지원하는 프롬프트 타입:
+    - 'preference': 사용자 선호도 묘사
+    - 'next_item': 다음 아이템 예측
+    - 'recommendation': 추천 아이템 생성
+    - 'user_profile': 사용자 프로필 생성
+    - 'recent_preference': 최근 선호도 묘사
     """
+    
+    # 프롬프트 템플릿 정의
+    PROMPT_TEMPLATES = {
+        'seq_rec': {
+        'title': 'You are an intelligent shopping assistant that helps predict what users may want to purchase next. Below is a list of items a user has purchased recently.\n' +\
+                   'Your task is to infer one or multiple kinds of products they may want to buy next, and generate relevant query terms that can be used to search for these potential products.\n' +\
+                   'Below is the user purchase history:\n',
+        'task': 'Based on this user\'s purchase history, generate relevant query terms that can be used to search for these potential products.',
+        },
+        'preference': {
+            'title': '# User Purchase History',
+            'task': '# Task\nBased on this user\'s purchase history, describe user\'s preference:',
+        },
+        'next_item': {
+            'title': '# User Purchase History',
+            'task': '# Task\nBased on this user\'s purchase history, predict what item the user will purchase next:',
+        },
+        'recommendation': {
+            'title': '# User Purchase History',
+            'task': '# Task\nBased on this user\'s purchase history, recommend suitable items for the user:',
+        },
+        'user_profile': {
+            'title': '# User Purchase History',
+            'task': '# Task\nBased on this user\'s purchase history, create a detailed user profile describing their interests and preferences:',
+        },
+        'recent_preference': {
+            'title': '# User Purchase History',
+            'task': '# Task\nBased on this user\'s purchase history, describe user\'s most recent preference:',
+        },
+    }
     
     def __init__(
         self,
         item_metadata: Dict,
         data_name: str = None,
+        prompt_type: str = 'seq_rec',
         use_brand: bool = True,
         use_category: bool = True,
         use_description: bool = False,
@@ -37,6 +75,7 @@ class PromptGenerator:
         Args:
             item_metadata: 아이템 메타데이터 딕셔너리
             data_name: 데이터셋 이름 (날짜 정보 로드에 사용)
+            prompt_type: 프롬프트 타입 ('preference', 'next_item', 'recommendation', 'user_profile', 'recent_preference')
             use_brand: 브랜드 정보 포함 여부
             use_category: 카테고리 정보 포함 여부
             use_description: 설명 정보 포함 여부
@@ -56,6 +95,15 @@ class PromptGenerator:
         self.use_date = use_date
         self.max_history_len = max_history_len
         self.history_text_max_length = history_text_max_length
+        
+        # 프롬프트 타입 설정
+        if prompt_type not in self.PROMPT_TEMPLATES:
+            print(f"⚠️  Unknown prompt type '{prompt_type}'. Available types: {list(self.PROMPT_TEMPLATES.keys())}")
+            print(f"   Using default 'recent_preference' type.")
+            self.prompt_type = 'recent_preference'
+        else:
+            self.prompt_type = prompt_type
+            print(f"✓ Using prompt type: '{self.prompt_type}'")
         
         # user2reviews_with_date.json 로드
         self.user_reviews_with_date = {}
@@ -159,12 +207,14 @@ class PromptGenerator:
             last_item_title = last_item.get('title', 'Unknown Item')
             history_text += f"\n\n`{last_item_title}` is the most recently purchased item."
         
+        # 선택된 프롬프트 템플릿 가져오기
+        template = self.PROMPT_TEMPLATES[self.prompt_type]
+        
         # 최종 프롬프트 생성
         prompt = (
-            f"# User Purchase History\n\n"
+            f"{template['title']}\n\n"
             f"{history_text}\n\n"
-            f"# Task\n"
-            f"Based on this user's purchase history, describe user's most recent preference:\n"
+            f"{template['task']}\n"
         )
         
         return prompt
@@ -390,9 +440,13 @@ def create_dataloaders(
     # use_date 파라미터 가져오기 (args에 있으면 사용, 없으면 True)
     use_date = getattr(args, 'use_date', True)
     
+    # prompt_type 파라미터 가져오기 (args에 있으면 사용, 없으면 'recent_preference')
+    prompt_type = getattr(args, 'prompt_type', 'seq_rec')
+    
     prompt_generator = PromptGenerator(
         item_metadata=item_metadata,
         data_name=args.dataset_name,
+        prompt_type=prompt_type,
         use_brand=args.use_brand,
         use_category=args.use_category,
         use_description=args.use_description,
