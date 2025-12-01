@@ -23,44 +23,79 @@ class PromptGenerator:
     def __init__(
         self,
         item_metadata: Dict,
+        data_name: str = None,
         use_brand: bool = True,
         use_category: bool = True,
         use_description: bool = False,
         use_features: bool = False,
         use_last_item: bool = True,
+        use_date: bool = True,
         max_history_len: int = 5,
         history_text_max_length: int = 100,
     ):
         """
         Args:
             item_metadata: 아이템 메타데이터 딕셔너리
+            data_name: 데이터셋 이름 (날짜 정보 로드에 사용)
             use_brand: 브랜드 정보 포함 여부
             use_category: 카테고리 정보 포함 여부
             use_description: 설명 정보 포함 여부
             use_features: 특징 정보 포함 여부
             use_last_item: 마지막 아이템 강조 여부
+            use_date: 날짜 정보 포함 여부
             max_history_len: 최대 히스토리 길이
             history_text_max_length: 히스토리 텍스트 최대 단어 수
         """
         self.item_metadata = item_metadata
+        self.data_name = data_name
         self.use_brand = use_brand
         self.use_category = use_category
         self.use_description = use_description
         self.use_features = use_features
         self.use_last_item = use_last_item
+        self.use_date = use_date
         self.max_history_len = max_history_len
         self.history_text_max_length = history_text_max_length
+        
+        # user2reviews_with_date.json 로드
+        self.user_reviews_with_date = {}
+        if self.use_date and data_name:
+            date_file_path = f"data/{data_name}/user2reviews_with_date.json"
+            if os.path.exists(date_file_path):
+                print(f"Loading date information from: {date_file_path}")
+                with open(date_file_path, 'r') as f:
+                    self.user_reviews_with_date = json.load(f)
+                print(f"✓ Loaded date information for {len(self.user_reviews_with_date)} users")
+            else:
+                print(f"⚠️  Date file not found: {date_file_path}. Dates will not be included.")
+                self.use_date = False
     
-    def generate_prompt(self, item_ids: List[int]) -> str:
+    def generate_prompt(self, item_ids: List[int], user_id: Optional[int] = None) -> str:
         """
         사용자 시퀀스로부터 프롬프트 생성
         
         Args:
             item_ids: 아이템 ID 리스트
+            user_id: 사용자 ID (날짜 정보 조회용, 선택적)
         
         Returns:
             생성된 프롬프트 문자열
         """
+        # 사용자의 리뷰 날짜 정보 가져오기
+        user_reviews = []
+        if self.use_date and user_id is not None:
+            user_id_str = str(user_id)
+            user_reviews = self.user_reviews_with_date.get(user_id_str, [])
+        
+        # 아이템 ID를 키로 하는 날짜 매핑 생성
+        item_to_date = {}
+        if user_reviews:
+            for review in user_reviews:
+                item_id = int(review.get('item_id', -1))
+                date = review.get('date', '')
+                if item_id != -1 and date:
+                    item_to_date[item_id] = date
+        
         # 히스토리 텍스트 리스트
         history_text_list = []
         
@@ -76,8 +111,15 @@ class PromptGenerator:
             item_categories = item_data.get('category', 'Unknown Category')
             item_description = item_data.get('description', '')
             
+            item_history_text = ""
+            # 날짜 정보 추가
+            if self.use_date and item_id in item_to_date:
+                item_date = item_to_date[item_id]
+                item_history_text += f"**Date:** {item_date}\n"
+            
+
             # 기본 히스토리 포맷
-            item_history_text = f"**Title:** `{item_title}`"
+            item_history_text += f"**Title:** `{item_title}`"
             
             if self.use_brand:
                 item_history_text += f"\n**Brand:** {item_brand}"
@@ -85,6 +127,7 @@ class PromptGenerator:
             if self.use_category:
                 item_history_text += f"\n**Categories:** {item_categories}"
             
+
             if self.use_description and item_description:
                 item_description = item_description.replace("\n", " ")
                 if len(item_description.split()) > self.history_text_max_length:
@@ -121,7 +164,7 @@ class PromptGenerator:
             f"# User Purchase History\n\n"
             f"{history_text}\n\n"
             f"# Task\n"
-            f"Based on this user's purchase history, describe user's preference:\n"
+            f"Based on this user's purchase history, describe user's most recent preference:\n"
         )
         
         return prompt
@@ -165,7 +208,12 @@ class RecommendationDataset(Dataset):
         self.prompt_dict = {}
         for user_id in self.user_ids:
             history = self.history_dict[user_id]
-            self.prompt_dict[user_id] = self.prompt_generator.generate_prompt(history)
+            self.prompt_dict[user_id] = self.prompt_generator.generate_prompt(history, user_id=user_id)
+
+        # print sample prompts
+        for user_id in [10, 20, 30]:
+            print(f"User {user_id}: \n{self.prompt_dict[user_id]}")
+            print("-" * 100)
         
         # Negative items 미리 샘플링 (초기화 시점)
         self.neg_items_dict = {}
@@ -338,11 +386,17 @@ def create_dataloaders(
     
     # 프롬프트 생성기
     print(f"✍️  Creating prompt generator...")
+    
+    # use_date 파라미터 가져오기 (args에 있으면 사용, 없으면 True)
+    use_date = getattr(args, 'use_date', True)
+    
     prompt_generator = PromptGenerator(
         item_metadata=item_metadata,
+        data_name=args.dataset_name,
         use_brand=args.use_brand,
         use_category=args.use_category,
         use_description=args.use_description,
+        use_date=use_date,
         max_history_len=args.max_history_len,
         history_text_max_length=args.history_text_max_length,
     )
