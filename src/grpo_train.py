@@ -152,6 +152,7 @@ class GRPOTrainerWrapper:
             reward_type=args.reward_type,
             k=args.k,
             normalize=args.normalize_rewards,
+            test_target=args.test_target,
         )
 
         print(f"🎯 Initializing GRPO Trainer...")
@@ -229,6 +230,7 @@ def parse_args():
     parser.add_argument("--use_last_item", action="store_true", default=True, help="Emphasize last item")
     parser.add_argument("--max_history_len", type=int, default=5, help="Max history length")
     parser.add_argument("--history_text_max_length", type=int, default=100, help="Max words per history item")
+    parser.add_argument("--test_target", action="store_true", help="Use target text for test")
     
     # GRPO Training
     parser.add_argument("--learning_rate", type=float, default=1e-5)

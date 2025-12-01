@@ -256,6 +256,7 @@ class RecRewardFrunction:
         reward_type: str = "ndcg",
         k: int = 10,
         normalize: bool = True,
+        test_target: bool = False,
     ):
         """
         Args:
@@ -273,7 +274,8 @@ class RecRewardFrunction:
         self.reward_type = reward_type
         self.k = k
         self.normalize = normalize
-        
+        self.test_target = test_target
+
         # RetrievalService 연결
         try:
             self.retrieval_service = ray.get_actor(
@@ -312,6 +314,10 @@ class RecRewardFrunction:
         Returns:
             rewards: [batch_size] 리워드 값
         """
+        # add target text to generated_texts
+        if self.test_target:
+            generated_texts = [self.item_metadata[target] + "\n" + generated_text for generated_text, target in zip(generated_texts, targets)]  
+
         # 1. RetrievalService를 통해 유사도 점수 계산
         use_negatives_only = neg_items is not None
         
