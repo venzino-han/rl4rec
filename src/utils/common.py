@@ -55,73 +55,6 @@ def parse_number_format(number_string):
     numbers = re.findall(r'\[\d+\]', number_string)
     return numbers
 
-# Inference function using ollama
-def generate_response_with_ollama(client, prompt, system_prompt, model_name="llama3.1:8b-instruct-fp16", temperature=0, num_tokens=64):
-    client.timeout = 1800
-    prompts = [
-            {
-                "role": "system",
-                "content": system_prompt,
-            },
-            {"role": "user", "content": prompt},
-        ]
-    
-    options = {
-        "temperature": temperature,
-        "num_predict": num_tokens,
-    }
-    response = client.chat(
-        model=model_name,
-        messages=prompts,
-        options=options,
-    )
-    result = response["message"]["content"]
-    return result 
-
-
-import asyncio
-
-# Function to generate a response asynchronously
-async def generate_response_with_ollama_async(client, prompt, system_prompt, options, model_name="llama3.1:8b-instruct-fp16"):
-    prompts = [
-        {
-            "role": "system",
-            "content": system_prompt,
-        },
-        {"role": "user", "content": prompt},
-    ]
-    
-    # Assuming client.chat is a synchronous function, we will wrap it in an executor to run it asynchronously
-    loop = asyncio.get_event_loop()
-    response = await loop.run_in_executor(
-        None, 
-        lambda: client.chat(model=model_name, messages=prompts, options=options)
-    )
-    
-    result = response["message"]["content"]
-    return result
-
-# Function to process multiple prompts asynchronously
-async def batch_generate_responses(client, prompts_with_system, model_name="llama3.1:8b-instruct-fp16", temperature=0, num_tokens=256):
-    tasks = []
-
-    options ={
-        "temperature": temperature,
-        "num_predict": num_tokens,
-    }
-    
-    for prompt, system_prompt in prompts_with_system:
-        tasks.append(generate_response_with_ollama_async(client, prompt, system_prompt, model_name, options))
-    
-    # Run tasks concurrently
-    results = await asyncio.gather(*tasks)
-    
-    return results
-
-# To run the batch processing function
-def process_batch_responses(client, prompts_with_system, model_name="llama3.1:8b-instruct-fp16", temperature=0, num_tokens=256):
-    return asyncio.run(batch_generate_responses(client, prompts_with_system, model_name, temperature, num_tokens))
-
 # def check_label_ratio(inference_results, labels):
 #     label_count = sum(1 for result, label in zip(inference_results, labels) if label in result or result in label)
 #     return round(label_count / len(labels), 4)
@@ -233,24 +166,6 @@ def filter_interactions(interactions):
         return interactions[:last_high_rating_index]
     else:
         return []
-
-def infer_prompt_with_ollama(client, prompt, system_prompt, model_name="llama3.1:8b-instruct-fp16", temperature=0):
-    prompts = [
-            {"role": "system", "content": system_prompt,},
-            {"role": "user", "content": prompt},
-        ]
-    
-    options = {
-        'temperature': temperature, 
-    }
-    response = client.chat(
-        model=model_name,
-        messages=prompts,
-        options=options,
-    )
-    result = response["message"]["content"]
-    return result 
-
 
 from transformers import AutoTokenizer
 

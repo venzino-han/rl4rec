@@ -4,7 +4,6 @@ import argparse
 
 import numpy as np
 import pandas as pd
-import ollama
 from tqdm import tqdm
 import random
 from collections import defaultdict
