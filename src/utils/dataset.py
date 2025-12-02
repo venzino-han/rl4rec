@@ -247,12 +247,27 @@ class PromptGenerator:
             history_text_list = history_text_list[-self.max_history_len:]
         
         # 최종 히스토리 텍스트 구성
-        if self.prompt_type == "reasoning":
-            history_text = "".join(history_text_list)
-        else:
-            history_text = "\n".join(history_text_list)
+        history_text = "\n\n".join(
+            f"{i+1}. {history}" for i, history in enumerate(history_text_list)
+        )
         
-        return history_text
+        # 마지막 아이템 강조
+        if self.use_last_item and len(item_ids) > 0:
+            last_item = self.item_metadata.get(item_ids[-1], {})
+            last_item_title = last_item.get('title', 'Unknown Item')
+            history_text += f"\n\n`{last_item_title}` is the most recently purchased item."
+        
+        # 선택된 프롬프트 템플릿 가져오기
+        template = self.PROMPT_TEMPLATES[self.prompt_type]
+        
+        # 최종 프롬프트 생성
+        prompt = (
+            f"{template['title']}\n\n"
+            f"{history_text}\n\n"
+            f"{template['task']}\n"
+        )
+        
+        return prompt
 
 
 class RecommendationDataset(Dataset):
