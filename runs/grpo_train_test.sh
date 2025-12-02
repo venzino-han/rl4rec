@@ -25,12 +25,12 @@ CUDA_VISIBLE_DEVICES=1 python3 src/grpo_train.py \
     --policy_model "google/gemma-3-1b-it" \
     --dataset_name "beauty" \
     --sequential_file "data/beauty/sequential_data.txt" \
-    --reward_type "mixed" \
+    --reward_type "ndcg" \
     --k 100 \
     --batch_size 2 \
     --num_sample_generations 2 \
     --gradient_accumulation_steps 1 \
-    --learning_rate 1e-5 \
+    --learning_rate 1e-6 \
     --num_epochs 1 \
     --max_steps 10000 \
     --max_length 512 \

@@ -70,12 +70,14 @@ class PromptGenerator:
         use_date: bool = True,
         max_history_len: int = 5,
         history_text_max_length: int = 100,
+        use_reviews: bool = False,
+        days_filter: int = None,
     ):
         """
         Args:
             item_metadata: 아이템 메타데이터 딕셔너리
             data_name: 데이터셋 이름 (날짜 정보 로드에 사용)
-            prompt_type: 프롬프트 타입 ('preference', 'next_item', 'recommendation', 'user_profile', 'recent_preference')
+            prompt_type: 프롬프트 타입 ('preference', 'next_item', 'recommendation', 'user_profile', 'recent_preference', 'reasoning')
             use_brand: 브랜드 정보 포함 여부
             use_category: 카테고리 정보 포함 여부
             use_description: 설명 정보 포함 여부
@@ -83,7 +85,9 @@ class PromptGenerator:
             use_last_item: 마지막 아이템 강조 여부
             use_date: 날짜 정보 포함 여부
             max_history_len: 최대 히스토리 길이
-            history_text_max_length: 히스토리 텍스트 최대 단어 수
+            history_text_max_length: 히스토리 텍스트 최대 단어 수 (review text에도 적용)
+            use_reviews: 리뷰 텍스트 포함 여부
+            days_filter: 최근 N일 이내의 리뷰만 포함 (None이면 필터링 안함)
         """
         self.item_metadata = item_metadata
         self.data_name = data_name
@@ -95,6 +99,8 @@ class PromptGenerator:
         self.use_date = use_date
         self.max_history_len = max_history_len
         self.history_text_max_length = history_text_max_length
+        self.use_reviews = use_reviews
+        self.days_filter = days_filter
         
         # 프롬프트 타입 설정
         if prompt_type not in self.PROMPT_TEMPLATES:
@@ -107,7 +113,7 @@ class PromptGenerator:
         
         # user2reviews_with_date.json 로드
         self.user_reviews_with_date = {}
-        if self.use_date and data_name:
+        if data_name:
             date_file_path = f"data/{data_name}/user2reviews_with_date.json"
             if os.path.exists(date_file_path):
                 print(f"Loading date information from: {date_file_path}")
@@ -118,106 +124,135 @@ class PromptGenerator:
                 print(f"⚠️  Date file not found: {date_file_path}. Dates will not be included.")
                 self.use_date = False
     
-    def generate_prompt(self, item_ids: List[int], user_id: Optional[int] = None) -> str:
+    def generate_prompt(self, item_ids: List[int], user_id: Optional[int] = None, target_timestamp: Optional[int] = None) -> str:
         """
         사용자 시퀀스로부터 프롬프트 생성
         
         Args:
             item_ids: 아이템 ID 리스트
             user_id: 사용자 ID (날짜 정보 조회용, 선택적)
+            target_timestamp: 타겟 타임스탬프 (days_filter 적용시 기준, 선택적)
         
         Returns:
             생성된 프롬프트 문자열
         """
-        # 사용자의 리뷰 날짜 정보 가져오기
+        # 사용자의 리뷰 정보 가져오기
         user_reviews = []
-        if self.use_date and user_id is not None:
+        if user_id is not None:
             user_id_str = str(user_id)
             user_reviews = self.user_reviews_with_date.get(user_id_str, [])
         
-        # 아이템 ID를 키로 하는 날짜 매핑 생성
-        item_to_date = {}
+        # 아이템 ID를 키로 하는 리뷰 매핑 생성
+        item_to_review = {}
         if user_reviews:
             for review in user_reviews:
                 item_id = int(review.get('item_id', -1))
-                date = review.get('date', '')
-                if item_id != -1 and date:
-                    item_to_date[item_id] = date
+                if item_id != -1:
+                    item_to_review[item_id] = review
         
         # 히스토리 텍스트 리스트
         history_text_list = []
         
         # 각 아이템 처리
-        for item_id in item_ids:
+        for idx, item_id in enumerate(item_ids):
             item_data = self.item_metadata.get(item_id)
             if item_data is None:
                 # 메타데이터가 없는 경우 스킵
                 continue
+            
+            # 시간 필터링 (days_filter가 설정되어 있고 target_timestamp가 주어진 경우)
+            if self.days_filter is not None and target_timestamp is not None and item_id in item_to_review:
+                review = item_to_review[item_id]
+                timestamp = int(review.get('timestamp', 0))
+                if target_timestamp - timestamp > self.days_filter * 24 * 60 * 60:
+                    continue
             
             item_title = item_data.get('title', 'Unknown Item')
             item_brand = item_data.get('brand', 'Unknown Brand')
             item_categories = item_data.get('category', 'Unknown Category')
             item_description = item_data.get('description', '')
             
-            item_history_text = ""
-            # 날짜 정보 추가
-            if self.use_date and item_id in item_to_date:
-                item_date = item_to_date[item_id]
-                item_history_text += f"**Date:** {item_date}\n"
+            # reasoning 타입일 경우 간단한 포맷
+            if self.prompt_type == "reasoning":
+                item_history_text = f"{idx+1}) {item_title} "
+            else:
+                item_history_text = ""
+                # 날짜 정보 추가
+                if self.use_date and item_id in item_to_review:
+                    item_date = item_to_review[item_id].get('date', '')
+                    if item_date:
+                        item_history_text += f"Date: {item_date}\n"
+                
+                # 기본 히스토리 포맷
+                item_history_text += f"Item Title: {item_title}\n"
+                
+                if self.use_brand:
+                    item_history_text += f"Brand: {item_brand}\n"
+                
+                if self.use_category:
+                    item_history_text += f"Categories: {item_categories}\n"
+                
+                if self.use_description and item_description:
+                    item_description = item_description.replace("\n", " ")
+                    if len(item_description.split()) > self.history_text_max_length:
+                        item_description = " ".join(
+                            item_description.split()[:self.history_text_max_length]
+                        ) + "..."
+                    item_history_text += f"Description: {item_description}\n"
+                
+                if self.use_features and item_features:
+                    if len(item_features.split("\n")) > 10:
+                        item_features = "\n".join(item_features.split("\n")[:10])
+                    item_features = item_features.replace("\n-", ",").replace("- ", "")
+                    item_history_text += f"Features:\n{item_features}\n"
             
-
-            # 기본 히스토리 포맷
-            item_history_text += f"**Title:** `{item_title}`"
+            # 리뷰 텍스트 추가
+            if self.use_reviews and item_id in item_to_review:
+                review_text = item_to_review[item_id].get('text', '')
+                # limit review text words
+                if review_text and len(review_text.split()) > self.history_text_max_length:
+                    review_text = " ".join(review_text.split()[:self.history_text_max_length])
+                if review_text:
+                    item_history_text += f"Review:\n{review_text}\n"
             
-            if self.use_brand:
-                item_history_text += f"\n**Brand:** {item_brand}"
-            
-            if self.use_category:
-                item_history_text += f"\n**Categories:** {item_categories}"
-            
-
-            if self.use_description and item_description:
-                item_description = item_description.replace("\n", " ")
-                if len(item_description.split()) > self.history_text_max_length:
-                    item_description = " ".join(
-                        item_description.split()[:self.history_text_max_length]
-                    ) + "..."
-                item_history_text += f"\n**Description:** {item_description}"
-            
-            if self.use_features and item_features:
-                if len(item_features.split("\n")) > 10:
-                    item_features = "\n".join(item_features.split("\n")[:10])
-                item_features = item_features.replace("\n-", ",").replace("- ", "")
-                item_history_text += f"\n**Features:**\n{item_features}"
-            
-            history_text_list.append(item_history_text)
+            if item_history_text:
+                history_text_list.append(item_history_text)
+        
+        # 히스토리가 비어있는 경우 마지막 아이템이라도 포함
+        if len(history_text_list) == 0 and len(item_ids) > 0:
+            last_item_id = item_ids[-1]
+            item_data = self.item_metadata.get(last_item_id)
+            if item_data:
+                item_title = item_data.get('title', 'Unknown Item')
+                item_brand = item_data.get('brand', 'Unknown Brand')
+                
+                if self.prompt_type == "reasoning":
+                    item_history_text = f"1) {item_title} "
+                else:
+                    item_history_text = f"Item Title: {item_title}\n"
+                    if self.use_brand:
+                        item_history_text += f"Brand: {item_brand}\n"
+                
+                if self.use_reviews and last_item_id in item_to_review:
+                    review_text = item_to_review[last_item_id].get('text', '')
+                    if review_text and len(review_text.split()) > self.history_text_max_length:
+                        review_text = " ".join(review_text.split()[:self.history_text_max_length])
+                    if review_text:
+                        item_history_text += f"Review:\n{review_text}\n"
+                
+                history_text_list.append(item_history_text)
         
         # 히스토리 길이 제약 적용
         if len(history_text_list) > self.max_history_len:
             history_text_list = history_text_list[-self.max_history_len:]
         
         # 최종 히스토리 텍스트 구성
-        history_text = "\n---\n".join(
-            f"{i+1}. {history}" for i, history in enumerate(history_text_list)
-        )
+        if self.prompt_type == "reasoning":
+            history_text = "".join(history_text_list)
+        else:
+            history_text = "\n".join(history_text_list)
         
-        # 마지막 아이템 강조
-        if self.use_last_item and len(item_ids) > 0:
-            last_item = self.item_metadata.get(item_ids[-1], {})
-            last_item_title = last_item.get('title', 'Unknown Item')
-            history_text += f"\n\n`{last_item_title}` is the most recently purchased item."
-        
-        # 선택된 프롬프트 템플릿 가져오기
-        template = self.PROMPT_TEMPLATES[self.prompt_type]
-        
-        # 최종 프롬프트 생성
-        prompt = (
-            f"{template['title']}\n\n"
-            f"{history_text}\n\n"
-            f"{template['task']}\n"
-        )
-        
-        return prompt
+        return history_text
 
 
 class RecommendationDataset(Dataset):
