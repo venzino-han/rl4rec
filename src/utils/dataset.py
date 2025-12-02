@@ -162,6 +162,7 @@ class PromptGenerator:
             item_data = self.item_metadata.get(item_id)
             if item_data is None:
                 # 메타데이터가 없는 경우 스킵
+                print(f"⚠️  Item metadata not found for item {item_id}")
                 continue
             
             # 시간 필터링 (days_filter가 설정되어 있고 target_timestamp가 주어진 경우)
@@ -169,46 +170,37 @@ class PromptGenerator:
                 review = item_to_review[item_id]
                 timestamp = int(review.get('timestamp', 0))
                 if target_timestamp - timestamp > self.days_filter * 24 * 60 * 60:
+                    # print(f"⚠️  Item timestamp is too old for item {item_id}")
                     continue
             
             item_title = item_data.get('title', 'Unknown Item')
             item_brand = item_data.get('brand', 'Unknown Brand')
             item_categories = item_data.get('category', 'Unknown Category')
             item_description = item_data.get('description', '')
+        
+            item_history_text = ""
+            # 날짜 정보 추가
+            if self.use_date and item_id in item_to_review:
+                item_date = item_to_review[item_id].get('date', '')
+                if item_date:
+                    item_history_text += f"Date: {item_date}\n"
             
-            # reasoning 타입일 경우 간단한 포맷
-            if self.prompt_type == "reasoning":
-                item_history_text = f"{idx+1}) {item_title} "
-            else:
-                item_history_text = ""
-                # 날짜 정보 추가
-                if self.use_date and item_id in item_to_review:
-                    item_date = item_to_review[item_id].get('date', '')
-                    if item_date:
-                        item_history_text += f"Date: {item_date}\n"
-                
-                # 기본 히스토리 포맷
-                item_history_text += f"Item Title: {item_title}\n"
-                
-                if self.use_brand:
-                    item_history_text += f"Brand: {item_brand}\n"
-                
-                if self.use_category:
-                    item_history_text += f"Categories: {item_categories}\n"
-                
-                if self.use_description and item_description:
-                    item_description = item_description.replace("\n", " ")
-                    if len(item_description.split()) > self.history_text_max_length:
-                        item_description = " ".join(
-                            item_description.split()[:self.history_text_max_length]
-                        ) + "..."
-                    item_history_text += f"Description: {item_description}\n"
-                
-                if self.use_features and item_features:
-                    if len(item_features.split("\n")) > 10:
-                        item_features = "\n".join(item_features.split("\n")[:10])
-                    item_features = item_features.replace("\n-", ",").replace("- ", "")
-                    item_history_text += f"Features:\n{item_features}\n"
+            # 기본 히스토리 포맷
+            item_history_text += f"Item Title: {item_title}\n"
+            
+            if self.use_brand:
+                item_history_text += f"Brand: {item_brand}\n"
+            
+            if self.use_category:
+                item_history_text += f"Categories: {item_categories}\n"
+            
+            if self.use_description and item_description:
+                item_description = item_description.replace("\n", " ")
+                if len(item_description.split()) > self.history_text_max_length:
+                    item_description = " ".join(
+                        item_description.split()[:self.history_text_max_length]
+                    ) + "..."
+                item_history_text += f"Description: {item_description}\n"
             
             # 리뷰 텍스트 추가
             if self.use_reviews and item_id in item_to_review:
@@ -219,32 +211,37 @@ class PromptGenerator:
                 if review_text:
                     item_history_text += f"Review:\n{review_text}\n"
             
-            if item_history_text:
-                history_text_list.append(item_history_text)
+            history_text_list.append(item_history_text)
         
         # 히스토리가 비어있는 경우 마지막 아이템이라도 포함
         if len(history_text_list) == 0 and len(item_ids) > 0:
             last_item_id = item_ids[-1]
-            item_data = self.item_metadata.get(last_item_id)
-            if item_data:
-                item_title = item_data.get('title', 'Unknown Item')
-                item_brand = item_data.get('brand', 'Unknown Brand')
-                
-                if self.prompt_type == "reasoning":
-                    item_history_text = f"1) {item_title} "
-                else:
-                    item_history_text = f"Item Title: {item_title}\n"
-                    if self.use_brand:
-                        item_history_text += f"Brand: {item_brand}\n"
-                
-                if self.use_reviews and last_item_id in item_to_review:
-                    review_text = item_to_review[last_item_id].get('text', '')
-                    if review_text and len(review_text.split()) > self.history_text_max_length:
-                        review_text = " ".join(review_text.split()[:self.history_text_max_length])
-                    if review_text:
-                        item_history_text += f"Review:\n{review_text}\n"
-                
-                history_text_list.append(item_history_text)
+
+            item_title = self.item_metadata.get(last_item_id, {}).get('title', 'Unknown Item')
+            item_brand = self.item_metadata.get(last_item_id, {}).get('brand', 'Unknown Brand')
+            item_categories = self.item_metadata.get(last_item_id, {}).get('category', 'Unknown Category')
+            item_description = self.item_metadata.get(last_item_id, {}).get('description', '')
+
+            item_history_text = ""
+            if self.use_date:
+                item_date = item_to_review[last_item_id].get('date', '')
+                if item_date:
+                    item_history_text += f"Date: {item_date}\n"
+
+            item_history_text += f"Item Title: {item_title}\n"
+            if self.use_brand:
+                item_history_text += f"Brand: {item_brand}\n"
+            if self.use_category:
+                item_history_text += f"Categories: {item_categories}\n"
+            
+            if self.use_reviews and last_item_id in item_to_review:
+                review_text = item_to_review[last_item_id].get('text', '')
+                if review_text and len(review_text.split()) > self.history_text_max_length:
+                    review_text = " ".join(review_text.split()[:self.history_text_max_length])
+                if review_text:
+                    item_history_text += f"Review:\n{review_text}\n"
+            
+            history_text_list.append(item_history_text)
         
         # 히스토리 길이 제약 적용
         if len(history_text_list) > self.max_history_len:

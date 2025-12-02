@@ -32,7 +32,7 @@ class LLMGenerator:
                 tensor_parallel_size=args.num_gpus,
                 max_model_len=args.max_input_tokens,
                 max_num_batched_tokens=args.max_input_tokens,
-                gpu_memory_utilization = 0.98,
+                gpu_memory_utilization = args.gpu_memory_utilization,
                 max_num_seqs=args.batch_size,
                 quantization="awq_marlin" if "awq" in args.model_name.lower() else None,
                 dtype=args.dtype,

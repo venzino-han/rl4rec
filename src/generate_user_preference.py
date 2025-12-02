@@ -82,6 +82,8 @@ def process_item_features(args):
         target_timestamp = int(reviews[index]["timestamp"])
         # 히스토리 아이템 ID 추출
         history_item_ids = [int(review["item_id"]) for review in reviews[index-args.history_limit:index]]
+
+        assert len(history_item_ids) > 0, f"History item ids is empty for user {user_id}"
         
         # PromptGenerator를 사용하여 히스토리 텍스트 생성
         history_text = prompt_generator.generate_prompt(
@@ -157,6 +159,7 @@ if __name__ == "__main__":
     parser.add_argument("--use_deep_infra", action="store_true", help="Use Deep Infra for inference.")
     parser.add_argument("--split", type=str, default="test", help="Split to use (train, valid, test).")
     parser.add_argument("--num_gpus", type=int, default=1, help="Number of GPUs to use.")
+    parser.add_argument("--gpu_memory_utilization", type=float, default=0.95, help="GPU memory utilization for inference.")
 
     args = parser.parse_args()
 
