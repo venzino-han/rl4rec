@@ -55,6 +55,10 @@ class PromptGenerator:
             'title': '# User Purchase History',
             'task': '# Task\nBased on this user\'s purchase history, describe user\'s most recent preference:',
         },
+        'reasoning': {
+            'title': '# User Purchase History',
+            'task': '# Task\nBased on this user\'s purchase history, reason about user\'s preference:',
+        },
     }
     
     def __init__(
