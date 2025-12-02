@@ -17,7 +17,7 @@ from trl import PPOTrainer, PPOConfig, AutoModelForCausalLMWithValueHead
 from transformers import AutoTokenizer
 from torch.utils.data import Dataset
 
-from train_utils.reward_funtion import create_reward_function
+from utils.reward_funtion import create_reward_function
 
 
 class RecommendationDataset(Dataset):

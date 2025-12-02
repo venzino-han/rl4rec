@@ -19,8 +19,8 @@ from trl.extras.profiling import profiling_decorator, profiling_context
 
 from transformers import AutoTokenizer, AutoModelForCausalLM
 
-from train_utils.reward_funtion import RecRewardFrunction
-from train_utils.dataset import create_dataloaders
+from utils.reward_funtion import RecRewardFrunction
+from utils.dataset import create_dataloaders
 
 from accelerate import logging
 from accelerate.utils import gather
