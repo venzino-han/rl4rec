@@ -10,16 +10,21 @@ import ray
 import torch
 import argparse
 import json
+import gc
+import numpy as np
 from datetime import datetime
 from pathlib import Path
 from typing import List, Dict
+from tqdm import tqdm
 
 from trl import GRPOTrainer, GRPOConfig
 from trl.extras.profiling import profiling_decorator, profiling_context
 
 from transformers import AutoTokenizer, AutoModelForCausalLM
+from vllm import LLM, SamplingParams
+from vllm.pooling_params import PoolingParams
 
-from utils.reward_funtion import RecRewardFrunction
+from utils.reward_funtion import RecRewardFrunction, calculate_ndcg, calculate_hit_rate
 from utils.dataset import create_dataloaders
 
 from accelerate import logging
@@ -165,6 +170,266 @@ class GRPOTrainerWrapper:
             processing_class=self.tokenizer,
         )
     
+    def evaluate_final_metrics(self, dataset, split="test"):
+        """
+        최종 평가: hit@k, ndcg@k (k=5,10,20)를 계산
+        vLLM을 사용해서 텍스트 생성 후 item embeddings와 유사도 계산
+        """
+        print(f"\n{'='*80}")
+        print(f"📊 Final Evaluation on {split.upper()} Set")
+        print(f"{'='*80}")
+        
+        # 0. reset GPU memory
+        self.model.to(torch.device("cpu"))
+        self.grpo_trainer.to(torch.device("cpu"))
+        torch.cuda.empty_cache()
+        gc.collect()
+
+        # 1. vLLM으로 모델 로드
+        print("🤖 Loading model with vLLM for generation...")
+        llm = LLM(
+            model=self.args.checkpoint_dir,
+            tensor_parallel_size=1,
+            dtype=torch.bfloat16 if self.args.bf16 else torch.float16,
+            gpu_memory_utilization=self.args.gpu_memory_utilization,
+            max_model_len=self.args.max_length,
+            max_num_seqs=self.args.eval_batch_size,
+        )
+        
+        # 2. Embedding model 로드 (retrieval_service 참고)
+        print("🔍 Loading embedding model for retrieval...")
+        emb_model_name = getattr(self.args, 'emb_model_name', 'mixedbread-ai/mxbai-embed-large-v1')
+        emb_model_name_dir = emb_model_name.split('/')[-1]
+        emb_type = getattr(self.args, 'emb_type', 'title')
+        
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        
+        # Pooling 파라미터 설정
+        pooling_params = PoolingParams(
+            truncate_prompt_tokens=512,
+            task="embed",
+        )
+        
+        emb_llm = LLM(
+            model=emb_model_name,
+            task="embed",
+            enforce_eager=True,
+            gpu_memory_utilization=0.3,
+            trust_remote_code=True,
+            max_model_len=512,
+            max_num_seqs=512,
+        )
+        
+        # 3. Item embeddings 로드
+        print("📦 Loading item embeddings...")
+        emb_file = f"data_emb/{self.args.dataset_name}_{emb_type}_{emb_model_name_dir}.pt"
+        item_embeddings = torch.load(emb_file, map_location=device)
+        item_embeddings = item_embeddings / item_embeddings.norm(dim=-1, keepdim=True)
+        num_items = item_embeddings.shape[0]
+        print(f"✓ Loaded item embeddings: {item_embeddings.shape}")
+        
+        # 4. 샘플링 파라미터 설정
+        sampling_params = SamplingParams(
+            n=1,
+            temperature=0.01,
+            max_tokens=self.args.max_new_tokens,
+            stop=["<|eot_id|>", "<|reserved_special_token_0|>", "<eos>"]
+        )
+        
+        # 5. 데이터셋 순회하며 평가
+        all_prompts = []
+        all_targets = []
+        all_histories = []
+        
+        print("📝 Collecting prompts...")
+        for i in tqdm(range(len(dataset)), desc="Preparing data"):
+            sample = dataset[i]
+            all_prompts.append(sample["prompt"])
+            all_targets.append(sample["target"])
+            all_histories.append(sample["history"])
+        
+        # 6. Batch 단위로 생성 및 평가
+        batch_size = self.args.eval_batch_size
+        num_batches = (len(all_prompts) + batch_size - 1) // batch_size
+        
+        # 메트릭 저장용
+        metrics = {
+            'hit@5': [], 'hit@10': [], 'hit@20': [],
+            'ndcg@5': [], 'ndcg@10': [], 'ndcg@20': []
+        }
+        
+        print(f"🚀 Generating responses and computing metrics...")
+        
+        # 샘플 출력을 위한 저장소
+        sample_outputs = []
+        
+        for batch_idx in tqdm(range(num_batches), desc="Evaluating"):
+            start_idx = batch_idx * batch_size
+            end_idx = min(start_idx + batch_size, len(all_prompts))
+            
+            batch_prompts = all_prompts[start_idx:end_idx]
+            batch_targets = all_targets[start_idx:end_idx]
+            batch_histories = all_histories[start_idx:end_idx]
+            
+            # 텍스트 생성
+            outputs = llm.generate(batch_prompts, sampling_params)
+            generated_texts = [output.outputs[0].text for output in outputs]
+            
+            # 첫 번째 배치에서 샘플 저장 (최대 3개)
+            if batch_idx == 0:
+                num_samples = min(3, len(batch_prompts))
+                for i in range(num_samples):
+                    sample_outputs.append({
+                        'prompt': batch_prompts[i],
+                        'generated': generated_texts[i],
+                        'target': batch_targets[i],
+                        'history': batch_histories[i]
+                    })
+            
+            # Embedding 계산
+            emb_outputs = emb_llm.encode(
+                prompts=generated_texts,
+                pooling_task="embed",
+                pooling_params=pooling_params,
+                use_tqdm=False,
+            )
+            
+            # Query embeddings 추출
+            embeddings_list = [
+                torch.as_tensor(out.outputs.data, dtype=torch.float32, device=device)
+                for out in emb_outputs
+            ]
+            query_embeddings = torch.stack(embeddings_list)
+            query_embeddings = query_embeddings / query_embeddings.norm(dim=-1, keepdim=True)
+            
+            # 전체 아이템과의 유사도 계산
+            scores = torch.matmul(query_embeddings, item_embeddings.T)  # [batch, num_items]
+            
+            # 과거 구매 아이템 제외
+            for i in range(len(batch_targets)):
+                if batch_histories[i]:
+                    # 히스토리 아이템 마스킹 (target은 제외)
+                    history_indices = [idx for idx in batch_histories[i] if idx != batch_targets[i]]
+                    if history_indices:
+                        scores[i, history_indices] = -float('inf')
+            
+            # k=(5, 10, 20)에 대해 메트릭 계산
+            for k in [5, 10, 20]:
+                # NDCG 계산
+                ndcg_scores = calculate_ndcg(
+                    scores,
+                    batch_targets,
+                    batch_histories,
+                    k=k,
+                    use_negatives_only=False
+                )
+                metrics[f'ndcg@{k}'].extend(ndcg_scores.cpu().tolist())
+                
+                # Hit 계산
+                hit_scores = calculate_hit_rate(
+                    scores,
+                    batch_targets,
+                    batch_histories,
+                    k=k,
+                    use_negatives_only=False
+                )
+                metrics[f'hit@{k}'].extend(hit_scores.cpu().tolist())
+        
+        # 7. 샘플 프롬프트와 생성 결과 출력
+        print(f"\n{'='*80}")
+        print(f"📝 Sample Prompts and Generated Texts")
+        print(f"{'='*80}")
+        
+        for idx, sample in enumerate(sample_outputs, 1):
+            print(f"\n[Sample {idx}]")
+            print(f"{'─'*80}")
+            print(f"Target Item ID: {sample['target']}")
+            print(f"History Items: {sample['history']}")
+            print(f"\n[Prompt]")
+            # 프롬프트가 길면 앞 300자만 출력
+            prompt_preview = sample['prompt'][:300] + "..." if len(sample['prompt']) > 300 else sample['prompt']
+            print(prompt_preview)
+            print(f"\n[Generated Text]")
+            print(sample['generated'])
+            print(f"{'─'*80}")
+        
+        # 8. 최종 메트릭 출력
+        print(f"\n{'='*80}")
+        print(f"📈 Final Evaluation Results ({split.upper()})")
+        print(f"{'='*80}")
+        
+        results_summary = []
+        for metric_name in ['hit@5', 'hit@10', 'hit@20', 'ndcg@5', 'ndcg@10', 'ndcg@20']:
+            mean_val = np.mean(metrics[metric_name])
+            result_line = f"  {metric_name.upper()}: {mean_val:.4f}"
+            print(result_line)
+            results_summary.append(result_line)
+        
+        print(f"{'='*80}\n")
+        
+        # 9. 결과를 .log 파일로 저장
+        results_dir = Path("results")
+        results_dir.mkdir(exist_ok=True)
+        
+        # 타임스탬프 추가
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        log_filename = f"{self.args.run_name}_{split}_eval_{timestamp}.log"
+        log_file = results_dir / log_filename
+        
+        with open(log_file, 'w') as f:
+            # 헤더
+            f.write("="*80 + "\n")
+            f.write(f"Evaluation Results - {split.upper()}\n")
+            f.write(f"Run Name: {self.args.run_name}\n")
+            f.write(f"Dataset: {self.args.dataset_name}\n")
+            f.write(f"Model: {self.args.policy_model}\n")
+            f.write(f"Timestamp: {timestamp}\n")
+            f.write("="*80 + "\n\n")
+            
+            # 메트릭 결과
+            f.write("EVALUATION METRICS\n")
+            f.write("-"*80 + "\n")
+            for line in results_summary:
+                f.write(line + "\n")
+            f.write("-"*80 + "\n\n")
+            
+            # 상세 통계
+            f.write("DETAILED STATISTICS\n")
+            f.write("-"*80 + "\n")
+            for metric_name in ['hit@5', 'hit@10', 'hit@20', 'ndcg@5', 'ndcg@10', 'ndcg@20']:
+                values = metrics[metric_name]
+                f.write(f"{metric_name.upper()}:\n")
+                f.write(f"  Mean: {np.mean(values):.4f}\n")
+                f.write(f"  Std:  {np.std(values):.4f}\n")
+                f.write(f"  Min:  {np.min(values):.4f}\n")
+                f.write(f"  Max:  {np.max(values):.4f}\n")
+                f.write("\n")
+            f.write("-"*80 + "\n\n")
+            
+            # 샘플 출력
+            f.write("SAMPLE PROMPTS AND GENERATED TEXTS\n")
+            f.write("="*80 + "\n")
+            for idx, sample in enumerate(sample_outputs, 1):
+                f.write(f"\n[Sample {idx}]\n")
+                f.write("-"*80 + "\n")
+                f.write(f"Target Item ID: {sample['target']}\n")
+                f.write(f"History Items: {sample['history']}\n")
+                f.write(f"\n[Prompt]\n")
+                f.write(sample['prompt'] + "\n")
+                f.write(f"\n[Generated Text]\n")
+                f.write(sample['generated'] + "\n")
+                f.write("-"*80 + "\n")
+        
+        print(f"💾 Evaluation results saved to: {log_file}")
+        
+        # 결과 딕셔너리 반환
+        results = {
+            metric_name: float(np.mean(values))
+            for metric_name, values in metrics.items()
+        }
+        
+        return results
+    
     def train(self):
         """
         전체 학습 루프 실행
@@ -173,28 +438,14 @@ class GRPOTrainerWrapper:
         print("🚀 Starting GRPO Training")
         print("=" * 80)
         
-        global_step = 0
-        best_reward = -float('inf')
-
         self.grpo_trainer.train()
-        
-        # 최종 테스트 평가
-        print("\n" + "=" * 80)
-        print("📊 Final Evaluation on Test Set")
-        print("=" * 80)
-        test_metrics = self.evaluate(self.test_dataloader, split="test")
-        
-        # 최종 체크포인트
-        final_checkpoint = self.checkpoint_dir / "checkpoint_final"
-        self.model.save_pretrained(final_checkpoint)
-        self.tokenizer.save_pretrained(final_checkpoint)
-        print(f"💾 Final checkpoint saved: {final_checkpoint}")
-        
         print("=" * 80)
         print("✓ Training completed!")
-        print(f"  Total steps: {global_step}")
-        print(f"  Best valid reward: {best_reward:.4f}")
         print("=" * 80)
+        
+        # 최종 테스트 평가
+        test_metrics = self.evaluate_final_metrics(self.test_dataset, split="test")
+        
 
 
 def parse_args():
@@ -216,6 +467,10 @@ def parse_args():
     parser.add_argument("--max_new_tokens", type=int, default=512)
     parser.add_argument("--temperature", type=float, default=1.0)
     parser.add_argument("--use_ref_model", action="store_true", help="Use reference model for KL penalty")
+    
+    # Embedding Model for Evaluation
+    parser.add_argument("--emb_model_name", type=str, default="mixedbread-ai/mxbai-embed-large-v1")
+    parser.add_argument("--emb_type", type=str, default="review_description", help="Type of item text to embed (title, description, etc.)")
     
     # Data
     parser.add_argument("--data_dir", type=str, default="data")
@@ -284,6 +539,7 @@ def main():
     trainer.train()
     
     print("✓ Done!")
+
 
 
 if __name__ == "__main__":
