@@ -4,7 +4,15 @@ import pandas as pd
 from collections import defaultdict
 from vllm import LLM, SamplingParams
 import torch
+from transformers import AutoTokenizer
+import numpy as np
 
+
+# Initialize tokenizer with proper padding
+def initialize_tokenizer(model_name: str):
+    tokenizer = AutoTokenizer.from_pretrained(model_name, padding_side="left",)
+    # tokenizer.add_special_tokens({"pad_token": "<|reserved_special_token_0|>"})
+    return tokenizer
 
 def calculate_ndcg(hit_list, k):
     """

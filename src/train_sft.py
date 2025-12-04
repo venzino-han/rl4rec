@@ -99,6 +99,21 @@ def get_uid_to_seq_data(args):
         train_user_target, val_user_target, test_user_target
     )
 
+def load_filtered_users(file_path):
+    """Load filtered user IDs from embedding comparison JSON file"""
+    if not file_path or not os.path.exists(file_path):
+        return None
+    
+    with open(file_path, 'r') as f:
+        data = json.load(f)
+    
+    filtered_user_ids = set(data['top_user_ids'])
+    print(f"Loaded {len(filtered_user_ids)} filtered users from {file_path}")
+    print(f"  Threshold similarity: {data.get('threshold_similarity', 'N/A')}")
+    print(f"  Mean similarity: {data.get('mean_similarity', 'N/A')}")
+    
+    return filtered_user_ids
+
 def get_user_text(args, user_seq_data, user_preference, item_meta, 
                   user_to_target_item=None, add_item_meta=False, 
                   add_target_item_meta=False):
@@ -235,6 +250,12 @@ def parse_arguments():
     parser.add_argument("--max_history_len", type=int, default=8)
     parser.add_argument("--days", type=int, default=60)
     parser.add_argument("--revearse", action="store_true")
+
+    # Filtered user settings
+    parser.add_argument("--use_filtered_users", action="store_true", 
+                        help="Use only filtered top users from embedding comparison")
+    parser.add_argument("--filtered_user_file", type=str, default=None,
+                        help="Path to filtered user JSON file (e.g., top25_target_vs_vanilla_beauty_train.json)")
 
     # Item meta settings
     parser.add_argument("--item_meta_list_text", type=str, default="title_brand_category")
@@ -498,6 +519,68 @@ if __name__ == "__main__":
     train_prompt_list = [train_uid_to_prompt[i] for i in range(len(train_uid_to_prompt))]
     val_prompt_list = [val_uid_to_prompt[i] for i in range(len(val_uid_to_prompt))]
     test_prompt_list = [test_uid_to_prompt[i] for i in range(len(test_uid_to_prompt))]
+
+    # Apply user filtering if enabled
+    if args.use_filtered_users and args.filtered_user_file:
+        print("="*50)
+        print("Applying user filtering...")
+        
+        # Determine file path pattern
+        if args.filtered_user_file:
+            # Load train filtered users
+            train_filter_file = args.filtered_user_file.replace("_train.json", "_train.json")
+            val_filter_file = args.filtered_user_file.replace("_train.json", "_valid.json")
+            test_filter_file = args.filtered_user_file.replace("_train.json", "_test.json")
+        else:
+            train_filter_file = None
+            val_filter_file = None
+            test_filter_file = None
+        
+        # Load filtered user IDs
+        train_filtered_users = load_filtered_users(train_filter_file)
+        val_filtered_users = load_filtered_users(val_filter_file)
+        test_filtered_users = load_filtered_users(test_filter_file)
+        
+        # Filter train data
+        if train_filtered_users:
+            original_train_size = len(train_prompt_list)
+            filtered_train_prompts = []
+            filtered_train_targets = []
+            for i in range(len(train_prompt_list)):
+                user_id = i + 1  # 1-indexed
+                if user_id in train_filtered_users:
+                    filtered_train_prompts.append(train_prompt_list[i])
+                    filtered_train_targets.append(train_target_text[i])
+            train_prompt_list = filtered_train_prompts
+            train_target_text = filtered_train_targets
+            print(f"Train: Filtered {original_train_size} → {len(train_prompt_list)} users")
+        
+        # Filter validation data
+        if val_filtered_users:
+            original_val_size = len(val_prompt_list)
+            filtered_val_prompts = []
+            filtered_val_targets = []
+            for i in range(len(val_prompt_list)):
+                user_id = i + 1  # 1-indexed
+                if user_id in val_filtered_users:
+                    filtered_val_prompts.append(val_prompt_list[i])
+                    filtered_val_targets.append(val_target_text[i])
+            val_prompt_list = filtered_val_prompts
+            val_target_text = filtered_val_targets
+            print(f"Valid: Filtered {original_val_size} → {len(val_prompt_list)} users")
+        
+        # Filter test data (if needed)
+        if test_filtered_users:
+            original_test_size = len(test_prompt_list)
+            filtered_test_prompts = []
+            for i in range(len(test_prompt_list)):
+                user_id = i + 1  # 1-indexed
+                if user_id in test_filtered_users:
+                    filtered_test_prompts.append(test_prompt_list[i])
+            test_prompt_list = filtered_test_prompts
+            print(f"Test: Filtered {original_test_size} → {len(test_prompt_list)} users")
+        
+        print("="*50)
 
     train_prompt_list = train_prompt_list[:args.num_train_samples]
     train_target_text = train_target_text[:args.num_train_samples]
