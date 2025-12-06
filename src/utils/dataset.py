@@ -76,6 +76,8 @@ class PromptGenerator:
         history_text_max_length: int = 100,
         use_reviews: bool = False,
         days_filter: int = None,
+        tokenizer = None,
+        apply_chat_template: bool = True,
     ):
         """
         Args:
@@ -92,6 +94,8 @@ class PromptGenerator:
             history_text_max_length: 히스토리 텍스트 최대 단어 수 (review text에도 적용)
             use_reviews: 리뷰 텍스트 포함 여부
             days_filter: 최근 N일 이내의 리뷰만 포함 (None이면 필터링 안함)
+            tokenizer: 토크나이저 (챗 템플릿 적용에 필요, 선택적)
+            apply_chat_template: 챗 템플릿 적용 여부
         """
         self.item_metadata = item_metadata
         self.data_name = data_name
@@ -105,6 +109,8 @@ class PromptGenerator:
         self.history_text_max_length = history_text_max_length
         self.use_reviews = use_reviews
         self.days_filter = days_filter
+        self.tokenizer = tokenizer
+        self.apply_chat_template = apply_chat_template
         
         # 프롬프트 타입 설정
         if prompt_type not in self.PROMPT_TEMPLATES:
@@ -267,6 +273,15 @@ class PromptGenerator:
             f"{history_text}\n\n"
             f"{template['task']}\n"
         )
+        
+        # 챗 템플릿 적용
+        if self.apply_chat_template and self.tokenizer is not None:
+            messages = [{"role": "user", "content": prompt}]
+            prompt = self.tokenizer.apply_chat_template(
+                messages, 
+                tokenize=False, 
+                add_generation_prompt=True
+            )
         
         return prompt
 
@@ -462,6 +477,8 @@ def load_item_metadata(dataset_name: str, data_dir: str = "data") -> Dict:
 
 def create_dataloaders(
     args: argparse.Namespace,
+    tokenizer: Optional = None,
+    apply_chat_template: bool = True,
 ) -> Tuple[DataLoader, DataLoader, DataLoader, PromptGenerator, Dict]:
     """
     Train/Valid/Test DataLoader 생성
@@ -504,6 +521,8 @@ def create_dataloaders(
         use_date=use_date,
         max_history_len=args.max_history_len,
         history_text_max_length=args.history_text_max_length,
+        tokenizer=tokenizer,
+        apply_chat_template=apply_chat_template,
     )
     
     # 데이터셋 생성

@@ -1,5 +1,6 @@
 import torch
 import argparse
+import gc
 
 from transformers import (
     AutoModelForCausalLM, 
@@ -35,6 +36,7 @@ from utils.common import (
     initialize_tokenizer,
     )
 from utils.dataset import PromptGenerator
+from evaluator import RecommendationEvaluator
 
 # off warning messages
 import warnings
@@ -264,6 +266,22 @@ def parse_arguments():
     parser.add_argument("--quantization_option", type=str, default="None")
     parser.add_argument("--rank_dim", type=int, default=8)
 
+    # Evaluation settings
+    parser.add_argument("--run_evaluation", action="store_true",
+                        help="Run evaluation after training using RecommendationEvaluator")
+    parser.add_argument("--save_responses", action="store_true",
+                        help="Save generated responses to JSON files")
+    parser.add_argument("--emb_model_name", type=str, default="mixedbread-ai/mxbai-embed-large-v1",
+                        help="Embedding model name for evaluation")
+    parser.add_argument("--emb_type", type=str, default="title",
+                        help="Embedding type (title, description, etc.)")
+    parser.add_argument("--eval_emb_max_length", type=int, default=512,
+                        help="Max length for embedding computation")
+    parser.add_argument("--eval_emb_batch_size", type=int, default=512,
+                        help="Batch size for embedding computation")
+    parser.add_argument("--eval_samples", type=int, default=100000,
+                        help="Maximum number of samples to evaluate")
+
     args = parser.parse_args()
     args.item_meta_list_text = args.item_meta_list_text.split("_")
     args.history_limit = args.max_history_len
@@ -371,7 +389,9 @@ def generate_lora_responses_with_vllm(
         prompt_list,
         temp_dir="temp",
     ):
-
+    """
+    LoRA를 사용한 응답 생성 (현재 미사용)
+    """
     response_list = []
     
     os.makedirs(temp_dir, exist_ok=True)
@@ -379,7 +399,7 @@ def generate_lora_responses_with_vllm(
     # Initialize VLLM LLM
     llm = LLM(
         model=args.model_name,
-        dtype=args.dtype,  # Change dtype if needed
+        dtype=torch.bfloat16,  # Change dtype if needed
         trust_remote_code=True,
         quantization="bitsandbytes" if args.quantization_option == "4bit" else None,
         load_format="bitsandbytes" if args.quantization_option == "4bit" else "auto",
@@ -406,7 +426,9 @@ def generate_lora_responses_with_vllm(
             base_model_name=args.model_name,
         )
     )
-    response_list.append(outputs[0].text)
+    
+    for output in outputs:
+        response_list.append(output.outputs[0].text)
 
     return pd.DataFrame({
         "prompt": prompt_list,
@@ -447,6 +469,103 @@ def generate_responses_with_vllm(
     for i, res in enumerate(responses):
         response_dict[i+1] = res
     return response_dict
+
+
+def prepare_eval_dataset(prompt_list, user_seq_data, user_target):
+    """
+    평가를 위한 데이터셋 준비
+    
+    Args:
+        prompt_list: 프롬프트 리스트
+        user_seq_data: 사용자별 시퀀스 데이터 (히스토리)
+        user_target: 사용자별 타겟 아이템
+    
+    Returns:
+        eval_data: 평가용 데이터 리스트 (각 항목은 dict)
+    """
+    eval_data = []
+    
+    for user_id in sorted(user_seq_data.keys()):
+        # user_id는 1-indexed
+        idx = user_id - 1
+        if idx >= len(prompt_list):
+            continue
+            
+        eval_data.append({
+            'prompt': prompt_list[idx],
+            'target': user_target[user_id],
+            'history': user_seq_data[user_id],
+        })
+    
+    return eval_data
+
+
+def evaluate_model(args, eval_data, split="test"):
+    """
+    학습된 모델을 평가
+    
+    Args:
+        args: 학습 설정 파라미터
+        eval_data: 평가용 데이터셋
+        split: 데이터셋 split 이름
+    
+    Returns:
+        results: 평가 결과 딕셔너리
+    """
+    print(f"\n{'='*80}")
+    print(f"🔍 Starting Evaluation on {split.upper()} Set")
+    print(f"{'='*80}")
+    
+    # GPU 메모리 정리
+    torch.cuda.empty_cache()
+    gc.collect()
+    
+    # Evaluator 설정을 위한 args 준비
+    # args에 필요한 속성들이 없으면 추가
+    checkpoint_dir = f"models/{args.run_name}_{args.data_name}_{args.model_name_dir}"
+    
+    # evaluator에 필요한 속성 설정
+    if not hasattr(args, 'checkpoint_dir'):
+        args.checkpoint_dir = checkpoint_dir
+    if not hasattr(args, 'policy_model'):
+        args.policy_model = args.model_name
+    if not hasattr(args, 'max_length'):
+        args.max_length = args.max_input_tokens
+    if not hasattr(args, 'max_new_tokens'):
+        args.max_new_tokens = args.max_output_tokens
+    if not hasattr(args, 'bf16'):
+        args.bf16 = True
+    if not hasattr(args, 'eval_batch_size'):
+        args.eval_batch_size = args.batch_size
+    if not hasattr(args, 'emb_model_name'):
+        args.emb_model_name = 'mixedbread-ai/mxbai-embed-large-v1'
+    if not hasattr(args, 'emb_type'):
+        args.emb_type = 'title'
+    if not hasattr(args, 'dataset_name'):
+        args.dataset_name = args.data_name
+    if not hasattr(args, 'eval_emb_max_length'):
+        args.eval_emb_max_length = 512
+    if not hasattr(args, 'eval_emb_batch_size'):
+        args.eval_emb_batch_size = 512
+    if not hasattr(args, 'eval_samples'):
+        args.eval_samples = 100000
+    
+    # Evaluator 인스턴스 생성 및 평가 실행
+    evaluator = RecommendationEvaluator(args, checkpoint_dir)
+    
+    try:
+        results = evaluator.evaluate(eval_data, split=split, save_log=True)
+    finally:
+        # 평가 완료 후 메모리 정리
+        evaluator.cleanup()
+        del evaluator
+        torch.cuda.empty_cache()
+        gc.collect()
+        
+        if torch.cuda.is_available():
+            print(f"\n💾 GPU Memory after evaluation: {torch.cuda.memory_allocated() / 1024**3:.2f} GB")
+    
+    return results
 
 
 if __name__ == "__main__":
@@ -673,33 +792,87 @@ if __name__ == "__main__":
         trainer.train()
         os.makedirs(f"models/{args.run_name}_{args.data_name}_{args.model_name_dir}", exist_ok=True)
         model.save_pretrained(f"models/{args.run_name}_{args.data_name}_{args.model_name_dir}")
-        # empty the device cache
-
-
+        
+        # 학습 완료 후 메모리 정리
+        print("\n" + "="*80)
+        print("🧹 Cleaning up training resources...")
+        print("="*80)
+        
+        # Trainer와 model 정리
+        if hasattr(trainer, 'model'):
+            trainer.model = None
+        if hasattr(trainer, 'optimizer'):
+            trainer.optimizer = None
+        if hasattr(trainer, 'lr_scheduler'):
+            trainer.lr_scheduler = None
+        
         del model
         del trainer
+        
+        # GPU 메모리 강제 해제
         torch.cuda.empty_cache()
+        gc.collect()
+        
+        if torch.cuda.is_available():
+            torch.cuda.synchronize()
+            print(f"💾 GPU Memory after training: {torch.cuda.memory_allocated() / 1024**3:.2f} GB")
+            print(f"💾 GPU Memory reserved: {torch.cuda.memory_reserved() / 1024**3:.2f} GB")
 
     # # 
 
-    # generate and save the results
-    response_dict = generate_responses_with_vllm(args, train_prompt_list)
-    with open(f"data_processed/{args.run_name}_{args.data_name}_{args.model_name_dir}_train_results.json", "w") as f:
-        json.dump(response_dict, f)
+    # Optional: generate and save the results
+    if args.save_responses:
+        print("\n" + "="*80)
+        print("📝 Generating and saving responses...")
+        print("="*80)
+        
+        response_dict = generate_responses_with_vllm(args, train_prompt_list)
+        with open(f"data_processed/{args.run_name}_{args.data_name}_{args.model_name_dir}_train_results.json", "w") as f:
+            json.dump(response_dict, f)
 
-    response_dict = generate_responses_with_vllm(args, val_prompt_list)
-    with open(f"data_processed/{args.run_name}_{args.data_name}_{args.model_name_dir}_valid_results.json", "w") as f:
-        json.dump(response_dict, f)
+        response_dict = generate_responses_with_vllm(args, val_prompt_list)
+        with open(f"data_processed/{args.run_name}_{args.data_name}_{args.model_name_dir}_valid_results.json", "w") as f:
+            json.dump(response_dict, f)
 
-    response_dict = generate_responses_with_vllm(args, test_prompt_list)
-    with open(f"data_processed/{args.run_name}_{args.data_name}_{args.model_name_dir}_test_results.json", "w") as f:
-        json.dump(response_dict, f)
+        response_dict = generate_responses_with_vllm(args, test_prompt_list)
+        with open(f"data_processed/{args.run_name}_{args.data_name}_{args.model_name_dir}_test_results.json", "w") as f:
+            json.dump(response_dict, f)
 
-
-    print("-"*50)
-    for i in [1, 10, 20, 30]:
-        print(response_dict[i])
         print("-"*50)
+        for i in [1, 10, 20, 30]:
+            if i in response_dict:
+                print(response_dict[i])
+                print("-"*50)
+
+    # Evaluation with RecommendationEvaluator
+    if args.run_evaluation:
+        print("\n" + "="*80)
+        print("🎯 Starting Model Evaluation")
+        print("="*80)
+        
+        # Prepare evaluation datasets
+        # Get the original user_seq_data and user_target for evaluation
+        # We need to map prompt_list back to user_seq_data
+        
+        # For test evaluation - use full test data if available
+        test_eval_data = prepare_eval_dataset(
+            test_prompt_list,
+            test_user_seq_data,
+            test_user_target
+        )
+        
+        print(f"Prepared {len(test_eval_data)} test samples for evaluation")
+        
+        # Run evaluation
+        test_results = evaluate_model(args, test_eval_data, split="test")
+        
+        print("\n" + "="*80)
+        print("✅ Evaluation Complete!")
+        print("="*80)
+        print("\nTest Results:")
+        for metric_name, value in test_results.items():
+            print(f"  {metric_name.upper()}: {value:.4f}")
+        print("="*80)
 
     # from transformers import pipeline
     # # Load the model and tokenizer into the pipeline
