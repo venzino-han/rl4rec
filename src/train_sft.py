@@ -219,28 +219,28 @@ def parse_arguments():
     parser.add_argument("--seed", type=int, default=22)
 
     # General settings
-    parser.add_argument("--run_name", type=str, default="lora_sft")
+    parser.add_argument("--run_name", type=str, default="sft")
     parser.add_argument("--data_name", type=str, default="toys")
     parser.add_argument("--device", type=str, default="cuda:0")
-    parser.add_argument("--model_name", type=str, default="meta-llama/Llama-3.2-1B-Instruct")
+    parser.add_argument("--model_name", type=str, default="google/gemma-3-1b-it")
     parser.add_argument("--target_model_name", type=str, default="gemma-3-12b-it")
     # parser.add_argument("--pretrained_run_name", type=str, default=None)
 
     # Training settings
     parser.add_argument("--train_batch_size", type=int, default=4)
     parser.add_argument("--eval_batch_size", type=int, default=8)
-    parser.add_argument("--learning_rate", type=float, default=1e-5)
+    parser.add_argument("--learning_rate", type=float, default=1e-6)
     parser.add_argument("--epochs", type=int, default=1)
     parser.add_argument("--gradient_accumulation_steps", type=int, default=1)
     parser.add_argument("--max_input_tokens", type=int, default=1024+512)
-    parser.add_argument("--batch_size", type=int, default=16)
     
-    parser.add_argument("--num_train_samples", type=int, default=5000)
-    parser.add_argument("--num_test_samples", type=int, default=100)
+    parser.add_argument("--num_train_samples", type=int, default=50000)
+    parser.add_argument("--num_test_samples", type=int, default=50000)
+    parser.add_argument("--max_steps", type=int, default=5000)
 
     parser.add_argument("--use_vllm", action="store_true")
     parser.add_argument("--max_output_tokens", type=int, default=1024)
-    parser.add_argument("--gpu_memory_utilization", type=float, default=0.92)
+    parser.add_argument("--gpu_memory_utilization", type=float, default=0.95)
 
     # Target settings
     parser.add_argument("--target", type=str, default="reasoning")
@@ -281,6 +281,9 @@ def parse_arguments():
                         help="Batch size for embedding computation")
     parser.add_argument("--eval_samples", type=int, default=100000,
                         help="Maximum number of samples to evaluate")
+
+    parser.add_argument("--checkpoint_dir", type=str, default=f"checkpoints/sft_beauty", help="Checkpoint directory")
+    parser.add_argument("--final_checkpoint_dir", type=str, default=f"checkpoints/sft_beauty/checkpoint-5000", help="Final checkpoint directory")
 
     args = parser.parse_args()
     args.item_meta_list_text = args.item_meta_list_text.split("_")
@@ -433,7 +436,6 @@ def generate_lora_responses_with_vllm(
     return pd.DataFrame({
         "prompt": prompt_list,
         "response": response_list,
-        "label_text": label_text_list,
     })
 
 def generate_responses_with_vllm(
@@ -448,7 +450,7 @@ def generate_responses_with_vllm(
         gpu_memory_utilization = args.gpu_memory_utilization,
         tokenizer=args.model_name,
         max_model_len=args.max_input_tokens,
-        max_num_seqs=args.batch_size,
+        max_num_seqs=args.eval_batch_size,
     )
 
     # Define sampling parameters
@@ -522,36 +524,9 @@ def evaluate_model(args, eval_data, split="test"):
     
     # Evaluator 설정을 위한 args 준비
     # args에 필요한 속성들이 없으면 추가
-    checkpoint_dir = f"models/{args.run_name}_{args.data_name}_{args.model_name_dir}"
-    
-    # evaluator에 필요한 속성 설정
-    if not hasattr(args, 'checkpoint_dir'):
-        args.checkpoint_dir = checkpoint_dir
-    if not hasattr(args, 'policy_model'):
-        args.policy_model = args.model_name
-    if not hasattr(args, 'max_length'):
-        args.max_length = args.max_input_tokens
-    if not hasattr(args, 'max_new_tokens'):
-        args.max_new_tokens = args.max_output_tokens
-    if not hasattr(args, 'bf16'):
-        args.bf16 = True
-    if not hasattr(args, 'eval_batch_size'):
-        args.eval_batch_size = args.batch_size
-    if not hasattr(args, 'emb_model_name'):
-        args.emb_model_name = 'mixedbread-ai/mxbai-embed-large-v1'
-    if not hasattr(args, 'emb_type'):
-        args.emb_type = 'title'
-    if not hasattr(args, 'dataset_name'):
-        args.dataset_name = args.data_name
-    if not hasattr(args, 'eval_emb_max_length'):
-        args.eval_emb_max_length = 512
-    if not hasattr(args, 'eval_emb_batch_size'):
-        args.eval_emb_batch_size = 512
-    if not hasattr(args, 'eval_samples'):
-        args.eval_samples = 100000
     
     # Evaluator 인스턴스 생성 및 평가 실행
-    evaluator = RecommendationEvaluator(args, checkpoint_dir)
+    evaluator = RecommendationEvaluator(args, args.final_checkpoint_dir)
     
     try:
         results = evaluator.evaluate(eval_data, split=split, save_log=True)
@@ -755,23 +730,22 @@ if __name__ == "__main__":
 
     if args.epochs > 0:
         training_args = SFTConfig(
-            output_dir="temp",              # directory to save and repository id
-            max_length=args.max_input_tokens,      # max sequence length for model and packing of the dataset
-            packing=True,                          # Groups multiple samples in the dataset into a single sequence
-            num_train_epochs=args.epochs,                     # number of training epochs
-            per_device_train_batch_size=4,          # batch size per device during training
-            gradient_checkpointing=False,           # Caching is incompatible with gradient checkpointing
+            output_dir=args.checkpoint_dir,                     # directory to save and repository id
+            max_length=args.max_input_tokens,                   # max sequence length for model and packing of the dataset
+            packing=True,                                       # Groups multiple samples in the dataset into a single sequence
+            num_train_epochs=args.epochs,                       # number of training epochs
+            per_device_train_batch_size=args.train_batch_size,  # batch size per device during training
+            gradient_checkpointing=False,                       # Caching is incompatible with gradient checkpointing
             max_grad_norm=1.0,
-            optim="adamw_torch_fused",              # use fused adamw optimizer
-            logging_steps=100,                        # log every step
-            save_strategy="epoch",                  # save checkpoint every epoch
-            eval_strategy="epoch",                  # evaluate checkpoint every epoch
-            learning_rate=args.learning_rate,            # learning rate
-            # fp16=True if torch_dtype == torch.float16 else False,   # use float16 precision
-            bf16=True,  # use bfloat16 precision
-            lr_scheduler_type="constant",           # use constant learning rate scheduler
-            # push_to_hub=True,                       # push model to hub
-            report_to="wandb",                # report metrics to tensorboard
+            optim="adamw_torch_fused",                          # use fused adamw optimizer
+            logging_steps=100,                                  # log every step
+            save_strategy="steps",                              # save checkpoint every epoch
+            eval_strategy="steps",                              # evaluate checkpoint every epoch
+            learning_rate=args.learning_rate,                   # learning rate
+            bf16=True,                                          # use bfloat16 precision
+            lr_scheduler_type="constant",                       # use constant learning rate scheduler
+            # push_to_hub=True,                                 # push model to hub
+            report_to="wandb",                                  # report metrics to tensorboard
             dataset_kwargs={
                 "add_special_tokens": False, # Template with special tokens
                 "append_concat_token": True, # Add EOS token as separator token between examples
@@ -805,6 +779,8 @@ if __name__ == "__main__":
             trainer.optimizer = None
         if hasattr(trainer, 'lr_scheduler'):
             trainer.lr_scheduler = None
+        if hasattr(trainer, 'accelerator'):
+            trainer.accelerator.free_memory()
         
         del model
         del trainer
@@ -812,7 +788,7 @@ if __name__ == "__main__":
         # GPU 메모리 강제 해제
         torch.cuda.empty_cache()
         gc.collect()
-        
+
         if torch.cuda.is_available():
             torch.cuda.synchronize()
             print(f"💾 GPU Memory after training: {torch.cuda.memory_allocated() / 1024**3:.2f} GB")
