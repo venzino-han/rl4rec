@@ -233,6 +233,8 @@ def parse_arguments():
     parser.add_argument("--epochs", type=int, default=1)
     parser.add_argument("--gradient_accumulation_steps", type=int, default=1)
     parser.add_argument("--max_input_tokens", type=int, default=1024+512)
+    parser.add_argument("--max_new_tokens", type=int, default=1024)
+    parser.add_argument("--max_length", type=int, default=1024*4)
     
     parser.add_argument("--num_train_samples", type=int, default=50000)
     parser.add_argument("--num_test_samples", type=int, default=50000)
@@ -587,14 +589,14 @@ if __name__ == "__main__":
             add_item_meta=args.add_item_meta, 
             add_target_item_meta=args.add_target_item_meta
         )
-    train_target_text = train_target_text[1:]
+    train_target_text = train_target_text
     val_target_text = get_user_text(
             args, val_user_seq_data, val_user_preference, item_meta, 
             user_to_target_item=val_user_target, 
             add_item_meta=args.add_item_meta, 
             add_target_item_meta=args.add_target_item_meta
         )
-    val_target_text = val_target_text[1:]
+    val_target_text = val_target_text
     # test_target_text = get_user_text(
     #         args, test_user_seq_data, test_user_preference, item_meta, 
     #         user_to_target_item=test_user_target, 
@@ -613,6 +615,9 @@ if __name__ == "__main__":
     train_prompt_list = [train_uid_to_prompt[i] for i in range(len(train_uid_to_prompt))]
     val_prompt_list = [val_uid_to_prompt[i] for i in range(len(val_uid_to_prompt))]
     test_prompt_list = [test_uid_to_prompt[i] for i in range(len(test_uid_to_prompt))]
+
+    assert len(train_prompt_list) == len(train_target_text), f"Train prompt list length {len(train_prompt_list)} != train target text length {len(train_target_text)}"
+    assert len(val_prompt_list) == len(val_target_text), f"Valid prompt list length {len(val_prompt_list)} != valid target text length {len(val_target_text)}"
 
     # Apply user filtering if enabled
     if args.use_filtered_users and args.filtered_user_file:
