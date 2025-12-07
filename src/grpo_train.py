@@ -155,7 +155,7 @@ class GRPOTrainerWrapper:
         self.reward_fn = RecRewardFrunction(
             retrieval_service_name=args.retrieval_service_name,
             namespace=args.namespace,
-            dataset_name=args.dataset_name,
+            data_name=args.data_name,
             reward_type=args.reward_type,
             k=args.k,
             normalize=args.normalize_rewards,
@@ -246,10 +246,10 @@ def parse_args():
     parser.add_argument("--ray_address", type=str, default="auto")
     parser.add_argument("--namespace", type=str, default="rl4rec")
     parser.add_argument("--retrieval_service_name", type=str, default="RetrievalService")
-    parser.add_argument("--dataset_name", type=str, default="beauty")
+    parser.add_argument("--data_name", type=str, default="beauty")
     
     # Model
-    parser.add_argument("--policy_model", type=str, default="google/gemma-3-1b-it")
+    parser.add_argument("--model_name", type=str, default="google/gemma-3-1b-it")
     parser.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu")
     parser.add_argument("--max_length", type=int, default=1024*4)
     parser.add_argument("--max_new_tokens", type=int, default=512)
@@ -286,10 +286,10 @@ def parse_args():
     parser.add_argument("--max_grad_norm", type=float, default=1.0)
     parser.add_argument("--num_epochs", type=int, default=3)
     parser.add_argument("--max_steps", type=int, default=5000)
+    parser.add_argument("--bf16", action="store_true", help="Use bfloat16")
     
     # Reward
-    parser.add_argument("--reward_type", type=str, default="ndcg",
-                        choices=["ndcg", "hit", "mrr", "mixed"])
+    parser.add_argument("--reward_type", type=str, default="ndcg", choices=["ndcg", "hit", "mixed"])
     parser.add_argument("--k", type=int, default=100, help="Top-K for metrics")
     parser.add_argument("--normalize_rewards", action="store_true", help="Normalize rewards")
     parser.add_argument("--num_negs", type=int, default=0, help="Number of negative items")
@@ -301,12 +301,7 @@ def parse_args():
     parser.add_argument("--eval_interval", type=int, default=100)
     parser.add_argument("--save_interval", type=int, default=500)
     parser.add_argument("--save_total_limit", type=int, default=3)
-    parser.add_argument("--report_to", type=str, default="wandb", 
-                        help="Logging backend (wandb, tensorboard, none)")
-    
-    # Precision
-    parser.add_argument("--bf16", action="store_true", help="Use bfloat16")
-    # parser.add_argument("--fp16", action="store_true", help="Use float16")
+    parser.add_argument("--report_to", type=str, default="wandb", help="Logging backend (wandb)")
     
     # Misc
     parser.add_argument("--seed", type=int, default=42)

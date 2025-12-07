@@ -168,7 +168,7 @@ class TRLTrainer:
         self.reward_fn = create_reward_function(
             retrieval_service_name=args.retrieval_service_name,
             namespace=args.namespace,
-            dataset_name=args.dataset_name,
+            data_name=args.data_name,
             reward_type=args.reward_type,
             k=args.k,
         )
@@ -339,7 +339,7 @@ def parse_args():
     parser.add_argument("--ray_address", type=str, default="auto")
     parser.add_argument("--namespace", type=str, default="rl4rec")
     parser.add_argument("--retrieval_service_name", type=str, default="RetrievalService")
-    parser.add_argument("--dataset_name", type=str, default="beauty")
+    parser.add_argument("--data_name", type=str, default="beauty")
     
     # Model
     parser.add_argument("--model_name", type=str, default="gpt2")

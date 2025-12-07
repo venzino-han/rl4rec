@@ -252,7 +252,7 @@ class RecRewardFrunction:
         self,
         retrieval_service_name: str = "RetrievalService",
         namespace: str = "rl4rec",
-        dataset_name: str = "beauty",
+        data_name: str = "beauty",
         reward_type: str = "ndcg",
         k: int = 10,
         normalize: bool = True,
@@ -262,7 +262,7 @@ class RecRewardFrunction:
         Args:
             retrieval_service_name: Ray actor 이름
             namespace: Ray namespace
-            dataset_name: 데이터셋 이름
+            data_name: 데이터셋 이름
             reward_type: 리워드 타입 ('ndcg', 'hit', 'mrr', 'mixed')
             k: Top-K 값
             normalize: 리워드 정규화 여부
@@ -270,7 +270,7 @@ class RecRewardFrunction:
         self.__name__ = "RecRewardFrunction"
         self.retrieval_service_name = retrieval_service_name
         self.namespace = namespace
-        self.dataset_name = dataset_name
+        self.data_name = data_name
         self.reward_type = reward_type
         self.k = k
         self.normalize = normalize
@@ -290,7 +290,7 @@ class RecRewardFrunction:
             ) from e
 
         #load item metadata
-        with open(f"data/{dataset_name}/meta_text_fix.json", "r") as f:
+        with open(f"data/{data_name}/meta_text_fix.json", "r") as f:
             self.item_metadata = json.load(f)
         self.item_metadata = {int(k): v["title"] + "\n" + v["brand"] + "\n" + v["category"] for k, v in self.item_metadata.items()}
     
@@ -323,7 +323,7 @@ class RecRewardFrunction:
         
         scores_ref = self.retrieval_service.calculate_reward.remote(
             generated_texts,
-            dataset_name=self.dataset_name,
+            data_name=self.data_name,
             targets=targets if use_negatives_only else None,
             neg_items=neg_items,
         )
@@ -373,7 +373,7 @@ class RecRewardFrunction:
         
         scores_ref = self.retrieval_service.calculate_reward.remote(
             completions,
-            dataset_name=self.dataset_name,
+            data_name=self.data_name,
             targets=targets if use_negatives_only else None,
             neg_items=neg_items,
         )
@@ -395,7 +395,7 @@ class RecRewardFrunction:
 def create_reward_function(
     retrieval_service_name: str = "RetrievalService",
     namespace: str = "rl4rec",
-    dataset_name: str = "beauty",
+    data_name: str = "beauty",
     reward_type: str = "ndcg",
     k: int = 10,
 ) -> RecRewardFrunction:
@@ -409,7 +409,7 @@ def create_reward_function(
     return RecRewardFrunction(
         retrieval_service_name=retrieval_service_name,
         namespace=namespace,
-        dataset_name=dataset_name,
+        data_name=data_name,
         reward_type=reward_type,
         k=k,
     )

@@ -436,12 +436,12 @@ def collate_fn(batch):
     }
 
 
-def load_item_metadata(dataset_name: str, data_dir: str = "data") -> Dict:
+def load_item_metadata(data_name: str, data_dir: str = "data") -> Dict:
     """
     아이템 메타데이터 로드
     
     Args:
-        dataset_name: 데이터셋 이름 (e.g., "beauty")
+        data_name: 데이터셋 이름 (e.g., "beauty")
         data_dir: 데이터 디렉토리
     
     Returns:
@@ -449,7 +449,7 @@ def load_item_metadata(dataset_name: str, data_dir: str = "data") -> Dict:
     """
     # 메타데이터 파일 경로 시도
     possible_paths = [
-        f"{data_dir}/{dataset_name}/meta_text.json",
+        f"{data_dir}/{data_name}/meta_text.json",
     ]
     
     item_metadata = {}
@@ -491,7 +491,7 @@ def create_dataloaders(
     """
     # 아이템 메타데이터 로드
     print(f"📦 Loading item metadata...")
-    item_metadata = load_item_metadata(args.dataset_name)
+    item_metadata = load_item_metadata(args.data_name)
     
     # num_items 가져오기 (args에 있으면 사용, 없으면 메타데이터에서 추출)
     num_items = getattr(args, 'num_items', None)
@@ -513,7 +513,7 @@ def create_dataloaders(
     
     prompt_generator = PromptGenerator(
         item_metadata=item_metadata,
-        data_name=args.dataset_name,
+        data_name=args.data_name,
         prompt_type=prompt_type,
         use_brand=args.use_brand,
         use_category=args.use_category,
@@ -530,7 +530,7 @@ def create_dataloaders(
     
     # Train dataset
     train_dataset = RecommendationDataset(
-        data_name=args.dataset_name,
+        data_name=args.data_name,
         item_metadata=item_metadata,
         prompt_generator=prompt_generator,
         split="train",
@@ -540,7 +540,7 @@ def create_dataloaders(
     
     # Valid dataset
     valid_dataset = RecommendationDataset(
-        data_name=args.dataset_name,
+        data_name=args.data_name,
         item_metadata=item_metadata,
         prompt_generator=prompt_generator,
         split="valid",
@@ -550,7 +550,7 @@ def create_dataloaders(
     
     # Test dataset
     test_dataset = RecommendationDataset(
-        data_name=args.dataset_name,
+        data_name=args.data_name,
         item_metadata=item_metadata,
         prompt_generator=prompt_generator,
         split="test",

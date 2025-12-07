@@ -42,11 +42,11 @@ class RetrievalService:
         self.reference_indices = self._load_multiple_datasets(self.args.datasets)
         print(f"✓ Loaded {len(self.reference_indices)} dataset(s) on {self.device}")
         
-    def _load_multiple_datasets(self, dataset_names=None):
+    def _load_multiple_datasets(self, data_names=None):
         """Load multiple datasets into a dictionary"""
         indices = {}
         
-        if dataset_names is None or len(dataset_names) == 0:
+        if data_names is None or len(data_names) == 0:
             # 데이터셋이 지정되지 않은 경우 dummy 데이터 생성
             name = "dummy"
             dummy_data = torch.rand(20000, 1024, device=self.device, dtype=torch.float32)
@@ -54,7 +54,7 @@ class RetrievalService:
             print(f"  Loaded dummy embedding: {dummy_data.shape}")
         else:        
             # 실제 데이터셋 로드
-            for name in dataset_names:
+            for name in data_names:
                 emb_file = f"data_emb/{name}_{self.args.emb_type}_{self.args.emb_model_name_dir}.pt"
                 print(f"  Loading: {emb_file}")
                 emb = torch.load(emb_file, map_location=self.device)
@@ -79,13 +79,13 @@ class RetrievalService:
         # print(outputs)
         return outputs
 
-    def calculate_reward(self, texts, dataset_name, targets=None, neg_items=None, debug=False):
+    def calculate_reward(self, texts, data_name, targets=None, neg_items=None, debug=False):
         """
         전체 인덱스 또는 지정된 아이템들에 대한 스코어 배열 계산
         
         Args:
             texts (List[str]): 임베딩할 텍스트 리스트
-            dataset_name (str): 사용할 데이터셋 이름 (필수)
+            data_name (str): 사용할 데이터셋 이름 (필수)
             targets (List[int], optional): 타겟 아이템 ID 리스트 [batch_size]
             neg_items (List[List[int]], optional): 배치별 negative 아이템 ID 리스트 [batch_size, num_negs]
             debug (bool): 디버깅 모드
@@ -95,8 +95,8 @@ class RetrievalService:
                 - targets/neg_items가 None인 경우: [len(texts), index_size] 전체 인덱스와의 유사도
                 - targets/neg_items가 제공된 경우: [len(texts), 1 + num_negs] target + negatives에 대한 유사도
         """
-        if dataset_name not in self.reference_indices:
-            raise ValueError(f"Dataset '{dataset_name}' not found. Available: {list(self.reference_indices.keys())}")
+        if data_name not in self.reference_indices:
+            raise ValueError(f"Dataset '{data_name}' not found. Available: {list(self.reference_indices.keys())}")
         
         # 1. vLLM 임베딩 (Batch Processing) - 직접 torch tensor로 변환
         
@@ -120,7 +120,7 @@ class RetrievalService:
         # query_embeddings = self.st_model.encode(texts, show_progress_bar=debug, convert_to_tensor=True)
         
         # 2. GPU에서 유사도 계산
-        reference_index = self.reference_indices[dataset_name]
+        reference_index = self.reference_indices[data_name]
 
         # cosine similarity
         query_embeddings = query_embeddings / query_embeddings.norm(dim=-1, keepdim=True)

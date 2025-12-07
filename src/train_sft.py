@@ -207,94 +207,6 @@ def get_time_aware_user_history_text(args, split="train", item_meta=None, prefix
     
     return uid_to_prompt
 
-def parse_arguments():
-    """
-    Parse command-line arguments for inference and training settings.
-    Returns:
-        argparse.Namespace: Parsed arguments.
-    """
-    parser = argparse.ArgumentParser(description="Run inference and generate test results.")
-
-    # fix seed
-    parser.add_argument("--seed", type=int, default=22)
-
-    # General settings
-    parser.add_argument("--run_name", type=str, default="sft")
-    parser.add_argument("--data_name", type=str, default="toys")
-    parser.add_argument("--device", type=str, default="cuda:0")
-    parser.add_argument("--model_name", type=str, default="google/gemma-3-1b-it")
-    parser.add_argument("--target_model_name", type=str, default="gemma-3-12b-it")
-    # parser.add_argument("--pretrained_run_name", type=str, default=None)
-
-    # Training settings
-    parser.add_argument("--train_batch_size", type=int, default=4)
-    parser.add_argument("--eval_batch_size", type=int, default=8)
-    parser.add_argument("--learning_rate", type=float, default=1e-6)
-    parser.add_argument("--epochs", type=int, default=1)
-    parser.add_argument("--gradient_accumulation_steps", type=int, default=1)
-    parser.add_argument("--max_input_tokens", type=int, default=1024+512)
-    parser.add_argument("--max_new_tokens", type=int, default=1024)
-    parser.add_argument("--max_length", type=int, default=1024*4)
-    
-    parser.add_argument("--num_train_samples", type=int, default=50000)
-    parser.add_argument("--num_test_samples", type=int, default=50000)
-    parser.add_argument("--max_steps", type=int, default=5000)
-
-    parser.add_argument("--use_vllm", action="store_true")
-    parser.add_argument("--max_output_tokens", type=int, default=1024)
-    parser.add_argument("--gpu_memory_utilization", type=float, default=0.95)
-
-    # Target settings
-    parser.add_argument("--target", type=str, default="reasoning")
-    parser.add_argument("--add_item_meta", action="store_true")
-    parser.add_argument("--add_target_item_meta", action="store_true")
-
-
-    # User history settings
-    parser.add_argument("--max_history_len", type=int, default=8)
-    parser.add_argument("--days", type=int, default=60)
-    parser.add_argument("--revearse", action="store_true")
-
-    # Filtered user settings
-    parser.add_argument("--use_filtered_users", action="store_true", 
-                        help="Use only filtered top users from embedding comparison")
-    parser.add_argument("--filtered_user_file", type=str, default=None,
-                        help="Path to filtered user JSON file (e.g., top25_target_vs_vanilla_beauty_train.json)")
-
-    # Item meta settings
-    parser.add_argument("--item_meta_list_text", type=str, default="title_brand_category")
-
-    # Quantization settings
-    parser.add_argument("--quantization_option", type=str, default="None")
-    parser.add_argument("--rank_dim", type=int, default=8)
-
-    # Evaluation settings
-    parser.add_argument("--run_evaluation", action="store_true",
-                        help="Run evaluation after training using RecommendationEvaluator")
-    parser.add_argument("--save_responses", action="store_true",
-                        help="Save generated responses to JSON files")
-    parser.add_argument("--emb_model_name", type=str, default="mixedbread-ai/mxbai-embed-large-v1",
-                        help="Embedding model name for evaluation")
-    parser.add_argument("--emb_type", type=str, default="title",
-                        help="Embedding type (title, description, etc.)")
-    parser.add_argument("--eval_emb_max_length", type=int, default=512,
-                        help="Max length for embedding computation")
-    parser.add_argument("--eval_emb_batch_size", type=int, default=512,
-                        help="Batch size for embedding computation")
-    parser.add_argument("--eval_samples", type=int, default=100000,
-                        help="Maximum number of samples to evaluate")
-
-    parser.add_argument("--checkpoint_dir", type=str, default=f"checkpoints/sft_beauty", help="Checkpoint directory")
-    parser.add_argument("--final_checkpoint_dir", type=str, default=f"checkpoints/sft_beauty/checkpoint-5000", help="Final checkpoint directory")
-
-    args = parser.parse_args()
-    args.item_meta_list_text = args.item_meta_list_text.split("_")
-    args.history_limit = args.max_history_len
-
-
-    return args
-
-
 def get_formatted_prompt_list(args, uid_to_prompt):
     prompt_list = []
     tokenizer = initialize_tokenizer(args.model_name)
@@ -545,6 +457,92 @@ def evaluate_model(args, eval_data, split="test"):
     return results
 
 
+
+def parse_arguments():
+    """
+    Parse command-line arguments for inference and training settings.
+    Returns:
+        argparse.Namespace: Parsed arguments.
+    """
+    parser = argparse.ArgumentParser(description="Run inference and generate test results.")
+
+    # fix seed
+    parser.add_argument("--seed", type=int, default=22)
+
+    # General settings
+    parser.add_argument("--run_name", type=str, default="sft")
+    parser.add_argument("--data_name", type=str, default="toys")
+    parser.add_argument("--device", type=str, default="cuda:0")
+    parser.add_argument("--model_name", type=str, default="google/gemma-3-1b-it")
+    parser.add_argument("--target_model_name", type=str, default="gemma-3-12b-it")
+    # parser.add_argument("--pretrained_run_name", type=str, default=None)
+
+    # Training settings
+    parser.add_argument("--train_batch_size", type=int, default=4)
+    parser.add_argument("--eval_batch_size", type=int, default=8)
+    parser.add_argument("--learning_rate", type=float, default=1e-6)
+    parser.add_argument("--epochs", type=int, default=1)
+    parser.add_argument("--gradient_accumulation_steps", type=int, default=1)
+    parser.add_argument("--max_input_tokens", type=int, default=1024+512)
+    parser.add_argument("--max_new_tokens", type=int, default=1024)
+    parser.add_argument("--max_length", type=int, default=1024*4)
+    
+    parser.add_argument("--num_train_samples", type=int, default=50000)
+    parser.add_argument("--num_test_samples", type=int, default=50000)
+    parser.add_argument("--max_steps", type=int, default=5000)
+
+    parser.add_argument("--use_vllm", action="store_true")
+    parser.add_argument("--max_output_tokens", type=int, default=1024)
+    parser.add_argument("--gpu_memory_utilization", type=float, default=0.95)
+
+    # Target settings
+    parser.add_argument("--target", type=str, default="reasoning")
+    parser.add_argument("--add_item_meta", action="store_true")
+    parser.add_argument("--add_target_item_meta", action="store_true")
+
+    # User history settings
+    parser.add_argument("--max_history_len", type=int, default=8)
+    parser.add_argument("--days", type=int, default=60)
+    parser.add_argument("--revearse", action="store_true")
+
+    # Filtered user settings
+    parser.add_argument("--use_filtered_users", action="store_true", 
+                        help="Use only filtered top users from embedding comparison")
+    parser.add_argument("--filtered_user_file", type=str, default=None,
+                        help="Path to filtered user JSON file (e.g., top25_target_vs_vanilla_beauty_train.json)")
+
+    # Item meta settings
+    parser.add_argument("--item_meta_list_text", type=str, default="title_brand_category")
+
+    # Quantization settings
+    parser.add_argument("--quantization_option", type=str, default="None")
+    parser.add_argument("--rank_dim", type=int, default=8)
+
+    # Evaluation settings
+    parser.add_argument("--run_evaluation", action="store_true",
+                        help="Run evaluation after training using RecommendationEvaluator")
+    parser.add_argument("--save_responses", action="store_true",
+                        help="Save generated responses to JSON files")
+    parser.add_argument("--emb_model_name", type=str, default="mixedbread-ai/mxbai-embed-large-v1",
+                        help="Embedding model name for evaluation")
+    parser.add_argument("--emb_type", type=str, default="review_description",
+                        help="Embedding type (title, description, etc.)")
+    parser.add_argument("--eval_emb_max_length", type=int, default=512,
+                        help="Max length for embedding computation")
+    parser.add_argument("--eval_emb_batch_size", type=int, default=512,
+                        help="Batch size for embedding computation")
+    parser.add_argument("--eval_samples", type=int, default=100000,
+                        help="Maximum number of samples to evaluate")
+
+    parser.add_argument("--checkpoint_dir", type=str, default=f"checkpoints/sft_beauty", help="Checkpoint directory")
+    parser.add_argument("--final_checkpoint_dir", type=str, default=f"checkpoints/sft_beauty/checkpoint-5000", help="Final checkpoint directory")
+
+    args = parser.parse_args()
+    args.item_meta_list_text = args.item_meta_list_text.split("_")
+    args.history_limit = args.max_history_len
+
+    return args
+
 if __name__ == "__main__":
     args = parse_arguments()
     random.seed(args.seed)
@@ -735,6 +733,8 @@ if __name__ == "__main__":
 
     if args.epochs > 0:
         training_args = SFTConfig(
+            run_name=f"{args.run_name}_{args.data_name}",
+            max_steps=args.max_steps,
             output_dir=args.checkpoint_dir,                     # directory to save and repository id
             max_length=args.max_input_tokens,                   # max sequence length for model and packing of the dataset
             packing=True,                                       # Groups multiple samples in the dataset into a single sequence
@@ -820,40 +820,39 @@ if __name__ == "__main__":
             json.dump(response_dict, f)
 
         print("-"*50)
-        for i in [1, 10, 20, 30]:
+        for i in [10, 20, 30]:
             if i in response_dict:
                 print(response_dict[i])
                 print("-"*50)
 
     # Evaluation with RecommendationEvaluator
-    if args.run_evaluation:
-        print("\n" + "="*80)
-        print("🎯 Starting Model Evaluation")
-        print("="*80)
-        
-        # Prepare evaluation datasets
-        # Get the original user_seq_data and user_target for evaluation
-        # We need to map prompt_list back to user_seq_data
-        
-        # For test evaluation - use full test data if available
-        test_eval_data = prepare_eval_dataset(
-            test_prompt_list,
-            test_user_seq_data,
-            test_user_target
-        )
-        
-        print(f"Prepared {len(test_eval_data)} test samples for evaluation")
-        
-        # Run evaluation
-        test_results = evaluate_model(args, test_eval_data, split="test")
-        
-        print("\n" + "="*80)
-        print("✅ Evaluation Complete!")
-        print("="*80)
-        print("\nTest Results:")
-        for metric_name, value in test_results.items():
-            print(f"  {metric_name.upper()}: {value:.4f}")
-        print("="*80)
+    print("\n" + "="*80)
+    print("🎯 Starting Model Evaluation")
+    print("="*80)
+    
+    # Prepare evaluation datasets
+    # Get the original user_seq_data and user_target for evaluation
+    # We need to map prompt_list back to user_seq_data
+    
+    # For test evaluation - use full test data if available
+    test_eval_data = prepare_eval_dataset(
+        test_prompt_list,
+        test_user_seq_data,
+        test_user_target
+    )
+    
+    print(f"Prepared {len(test_eval_data)} test samples for evaluation")
+    
+    # Run evaluation
+    test_results = evaluate_model(args, test_eval_data, split="test")
+    
+    print("\n" + "="*80)
+    print("✅ Evaluation Complete!")
+    print("="*80)
+    print("\nTest Results:")
+    for metric_name, value in test_results.items():
+        print(f"  {metric_name.upper()}: {value:.4f}")
+    print("="*80)
 
     # from transformers import pipeline
     # # Load the model and tokenizer into the pipeline

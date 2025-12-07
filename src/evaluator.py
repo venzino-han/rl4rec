@@ -87,7 +87,7 @@ class RecommendationEvaluator:
             emb_model_name_dir = emb_model_name.split('/')[-1]
             emb_type = getattr(self.args, 'emb_type', 'title')
             
-            emb_file = f"data_emb/{self.args.dataset_name}_{emb_type}_{emb_model_name_dir}.pt"
+            emb_file = f"data_emb/{self.args.data_name}_{emb_type}_{emb_model_name_dir}.pt"
             self.item_embeddings = torch.load(emb_file, map_location=self.device)
             self.item_embeddings = self.item_embeddings / self.item_embeddings.norm(dim=-1, keepdim=True)
             print(f"✓ Loaded item embeddings: {self.item_embeddings.shape}")
@@ -388,8 +388,8 @@ class RecommendationEvaluator:
             f.write("="*80 + "\n")
             f.write(f"Evaluation Results - {split.upper()}\n")
             f.write(f"Run Name: {self.args.run_name}\n")
-            f.write(f"Dataset: {self.args.dataset_name}\n")
-            f.write(f"Model: {self.args.policy_model}\n")
+            f.write(f"Dataset: {self.args.data_name}\n")
+            f.write(f"Model: {self.args.model_name}\n")
             f.write(f"Timestamp: {timestamp}\n")
             f.write("="*80 + "\n\n")
             
