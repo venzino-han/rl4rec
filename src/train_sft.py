@@ -536,6 +536,9 @@ def parse_arguments():
 
     parser.add_argument("--checkpoint_dir", type=str, default=f"checkpoints/sft_beauty", help="Checkpoint directory")
     parser.add_argument("--final_checkpoint_dir", type=str, default=f"checkpoints/sft_beauty/checkpoint-5000", help="Final checkpoint directory")
+    parser.add_argument("--logging_steps", type=int, default=100, help="Logging steps")
+    parser.add_argument("--save_steps", type=int, default=500, help="Save steps")
+    parser.add_argument("--eval_steps", type=int, default=5000, help="Eval steps")
 
     args = parser.parse_args()
     args.item_meta_list_text = args.item_meta_list_text.split("_")
@@ -743,9 +746,11 @@ if __name__ == "__main__":
             gradient_checkpointing=False,                       # Caching is incompatible with gradient checkpointing
             max_grad_norm=1.0,
             optim="adamw_torch_fused",                          # use fused adamw optimizer
-            logging_steps=100,                                  # log every step
+            logging_steps=args.logging_steps,                                  # log every step
             save_strategy="steps",                              # save checkpoint every epoch
+            save_steps=args.save_steps,
             eval_strategy="steps",                              # evaluate checkpoint every epoch
+            eval_steps=args.eval_steps,
             learning_rate=args.learning_rate,                   # learning rate
             bf16=True,                                          # use bfloat16 precision
             lr_scheduler_type="constant",                       # use constant learning rate scheduler

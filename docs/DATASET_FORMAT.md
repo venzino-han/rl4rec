@@ -10,7 +10,7 @@ GRPO 학습을 위한 데이터셋 형식과 준비 방법을 설명합니다.
 
 사용자의 아이템 시퀀스 및 타겟 아이템 정보
 
-**경로:** `data/{dataset_name}/sequential_data.txt`
+**경로:** `data/{data_name}/sequential_data.txt`
 
 **형식:**
 ```
@@ -33,10 +33,10 @@ user_id item1 item2 item3 ... itemN target_item
 아이템의 메타데이터 정보
 
 **경로 (우선순위 순):**
-1. `data/{dataset_name}/item_metadata.json`
-2. `data/{dataset_name}/item_metadata.pkl`
-3. `data/{dataset_name}/metadata.json`
-4. `data_processed/{dataset_name}_item_metadata.json`
+1. `data/{data_name}/item_metadata.json`
+2. `data/{data_name}/item_metadata.pkl`
+3. `data/{data_name}/metadata.json`
+4. `data_processed/{data_name}_item_metadata.json`
 
 **형식 (JSON):**
 ```json
@@ -211,7 +211,7 @@ python src/grpo_train.py \
   - [ ] 최소한 `title`, `brand`, `category` 포함
   
 - [ ] 파일 경로 확인
-  - [ ] `data/{dataset_name}/` 디렉토리 존재
+  - [ ] `data/{data_name}/` 디렉토리 존재
   - [ ] 파일 권한 확인
 
 ## 커스텀 데이터셋 사용
@@ -227,7 +227,7 @@ mkdir -p data/my_dataset
 
 ```bash
 python src/grpo_train.py \
-    --dataset_name "my_dataset" \
+    --data_name "my_dataset" \
     --data_dir "data" \
     --sequential_file "data/my_dataset/sequential_data.txt"
 ```
@@ -239,7 +239,7 @@ python src/grpo_train.py \
 ```python
 # grpo_train.py의 load_item_metadata 함수
 possible_paths = [
-    f"{data_dir}/{dataset_name}/item_metadata.json",
+    f"{data_dir}/{data_name}/item_metadata.json",
     f"my_custom_path/metadata.json",  # 추가
     ...
 ]

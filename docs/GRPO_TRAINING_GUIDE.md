@@ -84,7 +84,7 @@ ray status
 ```bash
 python src/grpo_train.py \
     --policy_model "gpt2" \
-    --dataset_name "beauty" \
+    --data_name "beauty" \
     --reward_type "ndcg" \
     --k 10 \
     --batch_size 4 \

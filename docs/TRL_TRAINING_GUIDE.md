@@ -22,7 +22,7 @@ from train_utils.reward_funtion import create_reward_function
 reward_fn = create_reward_function(
     retrieval_service_name="RetrievalService",
     namespace="rl4rec",
-    dataset_name="beauty",
+    data_name="beauty",
     reward_type="ndcg",  # 'ndcg', 'hit', 'mrr', 'mixed'
     k=10,
 )
@@ -73,7 +73,7 @@ trainer.train()
 ```bash
 python src/train_with_trl.py \
     --model_name "gpt2" \
-    --dataset_name "beauty" \
+    --data_name "beauty" \
     --reward_type "ndcg" \
     --k 10 \
     --batch_size 16 \
@@ -93,7 +93,7 @@ python src/train_with_trl.py \
 #### 리워드 설정
 - `--reward_type`: 리워드 타입 (ndcg/hit/mrr/mixed)
 - `--k`: Top-K 값 (기본: 10)
-- `--dataset_name`: 데이터셋 이름 (기본: "beauty")
+- `--data_name`: 데이터셋 이름 (기본: "beauty")
 
 #### PPO 학습 설정
 - `--learning_rate`: 학습률 (기본: 1e-5)
@@ -131,7 +131,7 @@ Ray를 활용한 비동기 리워드 계산:
 # 리워드 요청 (비동기)
 reward_ref = retrieval_service.calculate_reward.remote(
     generated_texts,
-    dataset_name="beauty"
+    data_name="beauty"
 )
 
 # 다른 작업 수행 가능...
