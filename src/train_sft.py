@@ -496,7 +496,7 @@ def parse_arguments():
     parser.add_argument("--gpu_memory_utilization", type=float, default=0.95)
 
     # Target settings
-    parser.add_argument("--target", type=str, default="reasoning")
+    parser.add_argument("--target", type=str, default="user_preference_reasoning")
     parser.add_argument("--add_item_meta", action="store_true")
     parser.add_argument("--add_target_item_meta", action="store_true")
 
