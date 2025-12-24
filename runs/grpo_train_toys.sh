@@ -21,24 +21,23 @@
 # export PYTHONPATH="${PYTHONPATH}:$(pwd)/src"
 
 # 학습 실행
-CUDA_VISIBLE_DEVICES=1 python3 src/grpo_train.py \
+CUDA_VISIBLE_DEVICES=6 python3 src/grpo_train.py \
     --policy_model "google/gemma-3-1b-it" \
-    --data_name "beauty" \
-    --sequential_file "data/beauty/sequential_data.txt" \
+    --data_name "toys" \
+    --sequential_file "data/toys/sequential_data.txt" \
     --reward_type "ndcg" \
     --k 100 \
-    --batch_size 2 \
-    --num_sample_generations 2 \
+    --batch_size 32 \
+    --num_sample_generations 4 \
     --gradient_accumulation_steps 1 \
-    --learning_rate 1e-6 \
+    --learning_rate 5e-5 \
     --num_epochs 1 \
-    --max_steps 10000 \
-    --max_length 512 \
+    --max_steps 3000 \
     --use_brand \
     --use_category \
     --checkpoint_dir "checkpoints/grpo" \
     --log_interval 10 \
-    --eval_interval 10 \
+    --eval_interval 100 \
     --save_interval 500 \
     --num_negs 99 \
     --device "cuda" \

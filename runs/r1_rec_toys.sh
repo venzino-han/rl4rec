@@ -20,29 +20,31 @@
 # # Python 경로 설정
 # export PYTHONPATH="${PYTHONPATH}:$(pwd)/src"
 
+max_steps=15000
+dataset_name="toys"
 # 학습 실행
-CUDA_VISIBLE_DEVICES=1 python3 src/grpo_train.py \
-    --policy_model "google/gemma-3-1b-it" \
-    --data_name "beauty" \
-    --sequential_file "data/beauty/sequential_data.txt" \
+CUDA_VISIBLE_DEVICES=6 python3 src/grpo_train.py \
+    --run_name "r1_rec_$dataset_name" \
+    --model_name "google/gemma-3-1b-it" \
+    --data_name $dataset_name \
+    --sequential_file "data/$dataset_name/sequential_data.txt" \
     --reward_type "ndcg" \
-    --k 100 \
-    --batch_size 2 \
-    --num_sample_generations 2 \
+    --k 1000 \
+    --batch_size 32 \
+    --num_sample_generations 4 \
     --gradient_accumulation_steps 1 \
     --learning_rate 1e-6 \
-    --num_epochs 1 \
-    --max_steps 10000 \
-    --max_length 512 \
+    --num_epochs 3 \
+    --max_steps $max_steps \
     --use_brand \
     --use_category \
-    --checkpoint_dir "checkpoints/grpo" \
-    --log_interval 10 \
-    --eval_interval 10 \
-    --save_interval 500 \
-    --num_negs 99 \
+    --checkpoint_dir "checkpoints/r1_rec_$dataset_name" \
+    --final_checkpoint_dir "checkpoints/r1_rec_$dataset_name/checkpoint-$max_steps" \
+    --log_interval 100 \
+    --eval_interval 5000 \
+    --save_interval 2500 \
+    --num_negs 0 \
     --device "cuda" \
-    --normalize_rewards \
     "$@"
 
 echo "✅ Training completed!"

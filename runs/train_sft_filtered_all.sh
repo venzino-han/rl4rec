@@ -9,9 +9,9 @@ TARGET_MODEL_NAME="gemma-3-12b-it"
 RUN_NAME_PREFIX="lora_sft_filtered_top25"
 
 # Training settings
-NUM_TRAIN_SAMPLES=5000
-NUM_TEST_SAMPLES=100
-BATCH_SIZE=8
+NUM_TRAIN_SAMPLES=50000
+NUM_TEST_SAMPLES=50000
+BATCH_SIZE=16
 EPOCHS=1
 LEARNING_RATE=1e-5
 MAX_HISTORY_LEN=8
@@ -55,7 +55,7 @@ for DATA_NAME in "${DATASETS[@]}"; do
     
     # Run training with filtered users
     echo "Starting training..."
-    python3 src/train_sft.py \
+    CUDA_VISIBLE_DEVICES=1 python3 src/train_sft.py \
         --data_name $DATA_NAME \
         --model_name $MODEL_NAME \
         --target_model_name $TARGET_MODEL_NAME \
@@ -65,6 +65,8 @@ for DATA_NAME in "${DATASETS[@]}"; do
         --batch_size $BATCH_SIZE \
         --learning_rate $LEARNING_RATE \
         --max_history_len $MAX_HISTORY_LEN \
+        --num_train_samples $NUM_TRAIN_SAMPLES \
+        --num_test_samples $NUM_TEST_SAMPLES \
         --days $DAYS \
         --use_filtered_users \
         --filtered_user_file $FILTERED_USER_FILE \

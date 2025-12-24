@@ -668,18 +668,7 @@ if __name__ == "__main__":
             val_prompt_list = filtered_val_prompts
             val_target_text = filtered_val_targets
             print(f"Valid: Filtered {original_val_size} → {len(val_prompt_list)} users")
-        
-        # Filter test data (if needed)
-        if test_filtered_users:
-            original_test_size = len(test_prompt_list)
-            filtered_test_prompts = []
-            for i in range(len(test_prompt_list)):
-                user_id = i + 1  # 1-indexed
-                if user_id in test_filtered_users:
-                    filtered_test_prompts.append(test_prompt_list[i])
-            test_prompt_list = filtered_test_prompts
-            print(f"Test: Filtered {original_test_size} → {len(test_prompt_list)} users")
-        
+         
         print("="*50)
 
     train_prompt_list = train_prompt_list[:args.num_train_samples]

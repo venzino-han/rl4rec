@@ -102,15 +102,15 @@ class GRPOTrainerWrapper:
             print(f"✓ Ray initialized")
         
         # 토크나이저 로드
-        print(f"📚 Loading tokenizer: {args.policy_model}")
-        self.tokenizer = AutoTokenizer.from_pretrained(args.policy_model)
+        print(f"📚 Loading tokenizer: {args.model_name}")
+        self.tokenizer = AutoTokenizer.from_pretrained(args.model_name)
         if self.tokenizer.pad_token is None:
             self.tokenizer.pad_token = self.tokenizer.eos_token
         
         # 모델 로드
-        print(f"🤖 Loading model: {args.policy_model}")
+        print(f"🤖 Loading model: {args.model_name}")
         self.model = AutoModelForCausalLM.from_pretrained(
-            args.policy_model,
+            args.model_name,
             trust_remote_code=True,
         )
         

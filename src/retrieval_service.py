@@ -57,9 +57,10 @@ class RetrievalService:
             for name in data_names:
                 emb_file = f"data_emb/{name}_{self.args.emb_type}_{self.args.emb_model_name_dir}.pt"
                 print(f"  Loading: {emb_file}")
-                emb = torch.load(emb_file, map_location=self.device)
+                emb = torch.load(emb_file, map_location=self.device,)
                 indices[name] = emb / emb.norm(dim=-1, keepdim=True)
                 print(f"  Loaded dataset '{name}': {emb.shape}")
+                print(f"  Device: {indices[name].device}")
         
         return indices
 
