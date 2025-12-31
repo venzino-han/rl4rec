@@ -35,7 +35,7 @@ from utils.common import (
     generate_response_with_vllm,
     initialize_tokenizer,
     )
-from utils.dataset import PromptGenerator
+from utils.dataset import PromptGenerator, PROMPT_TEMPLATES
 from evaluator import RecommendationEvaluator
 
 # off warning messages

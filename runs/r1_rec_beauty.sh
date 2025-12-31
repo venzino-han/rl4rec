@@ -29,11 +29,11 @@ CUDA_VISIBLE_DEVICES=1 python3 src/grpo_train.py \
     --sequential_file "data/$dataset_name/sequential_data.txt" \
     --reward_type "ndcg" \
     --k 1000 \
-    --batch_size 32 \
+    --batch_size 24 \
     --num_sample_generations 4 \
     --gradient_accumulation_steps 1 \
     --learning_rate 1e-6 \
-    --num_epochs 3 \
+    --num_epochs 1 \
     --max_steps $max_steps \
     --use_brand \
     --use_category \
