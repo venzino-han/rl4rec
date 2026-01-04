@@ -19,7 +19,7 @@
 
 # # Python 경로 설정
 # export PYTHONPATH="${PYTHONPATH}:$(pwd)/src"
-max_steps=15000
+max_steps=1000
 dataset_name="beauty"
 # 학습 실행
 CUDA_VISIBLE_DEVICES=1 python3 src/grpo_train.py \
@@ -29,7 +29,8 @@ CUDA_VISIBLE_DEVICES=1 python3 src/grpo_train.py \
     --sequential_file "data/$dataset_name/sequential_data.txt" \
     --reward_type "ndcg" \
     --k 1000 \
-    --batch_size 24 \
+    --max_new_tokens 128 \
+    --batch_size 64 \
     --num_sample_generations 4 \
     --gradient_accumulation_steps 1 \
     --learning_rate 1e-6 \
@@ -41,7 +42,7 @@ CUDA_VISIBLE_DEVICES=1 python3 src/grpo_train.py \
     --final_checkpoint_dir "checkpoints/r1_rec_$dataset_name/checkpoint-$max_steps" \
     --log_interval 100 \
     --eval_interval 5000 \
-    --save_interval 2500 \
+    --save_interval 500 \
     --num_negs 0 \
     --device "cuda" \
     "$@"

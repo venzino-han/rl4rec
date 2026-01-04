@@ -1,9 +1,13 @@
 #!/usr/bin/env python3
 """
-GRPO Training Script for Recommendation System
-TRL의 GRPOTrainer를 사용한 추천 시스템 학습
+GRPO Training Script for Recommendation System (Unsloth Version)
+TRL의 GRPOTrainer와 Unsloth를 사용한 추천 시스템 학습
 RetrievalService와 연동하여 NDCG 기반 리워드로 학습
 """
+
+import unsloth
+from unsloth import FastLanguageModel
+from unsloth import is_bfloat16_supported
 
 import os
 import ray
@@ -14,7 +18,7 @@ import gc
 import numpy as np
 from datetime import datetime
 from pathlib import Path
-from typing import List, Dict, Optional
+from typing import List, Dict
 from tqdm import tqdm
 
 from trl import GRPOTrainer, GRPOConfig
@@ -24,12 +28,7 @@ from transformers import AutoTokenizer, AutoModelForCausalLM
 from vllm import LLM, SamplingParams
 from vllm.pooling_params import PoolingParams
 
-from utils.reward_function import (
-    RecRewardFrunction, 
-    calculate_ndcg, 
-    calculate_hit_rate,
-    LocalEmbeddingRewardFunction
-)
+from utils.reward_function import RecRewardFrunction, calculate_ndcg, calculate_hit_rate
 from utils.dataset import create_dataloaders
 from evaluator import RecommendationEvaluator
 
@@ -67,7 +66,6 @@ class GRPOTrainerRecReward(GRPOTrainer):
                     generated_texts=completions,
                     targets=reward_kwargs["target"],
                     histories=reward_kwargs["history"],
-                    user_ids=reward_kwargs["user_id"],
                     **reward_kwargs,
                 )
                 # Convert None values to NaN
@@ -95,31 +93,81 @@ class GRPOTrainerRecReward(GRPOTrainer):
 
 class GRPOTrainerWrapper:
     """
-    TRL GRPO를 활용한 추천 시스템 학습기
+    TRL GRPO + Unsloth를 활용한 추천 시스템 학습기
     """
     
     def __init__(self, args):
         self.args = args
         
-        # Ray 초기화 (use_local_embedding이 False인 경우에만)
-        if not args.use_local_embedding:
-            if not ray.is_initialized():
-                print(f"🔧 Initializing Ray...")
-                ray.init(address=args.ray_address, namespace=args.namespace)
-                print(f"✓ Ray initialized")
+        # Ray 초기화 (이미 되어있으면 skip)
+        if not ray.is_initialized():
+            print(f"🔧 Initializing Ray...")
+            ray.init(address=args.ray_address, namespace=args.namespace)
+            print(f"✓ Ray initialized")
         
-        # 토크나이저 로드
-        print(f"📚 Loading tokenizer: {args.model_name}")
-        self.tokenizer = AutoTokenizer.from_pretrained(args.model_name)
+        # LoRA 사용 여부에 따라 모델 로드 방식 선택
+        print(f"🚀 Loading model: {args.model_name}")
+        print(f"   - Max sequence length: {args.max_length}")
+        print(f"   - LoRA rank: {args.lora_r}")
+        
+        if args.lora_r == 0:
+            # Full Fine-tuning: Unsloth 없이 일반 Transformers 사용
+            print(f"   - Training mode: Full parameter training (without Unsloth)")
+            print(f"   - Using standard Transformers library")
+            
+            self.tokenizer = AutoTokenizer.from_pretrained(args.model_name)
+            self.model = AutoModelForCausalLM.from_pretrained(
+                args.model_name,
+                torch_dtype=torch.bfloat16 if is_bfloat16_supported() else torch.float16,
+                device_map="auto",
+                # attn_implementation="flash_attention_2",  # 필요시 활성화
+            )
+            
+            # 모든 파라미터를 학습 가능하도록 설정
+            for param in self.model.parameters():
+                param.requires_grad = True
+            
+            print(f"✓ Model loaded for full finetuning")
+            self.use_unsloth = False
+            
+        else:
+            # LoRA Fine-tuning: Unsloth 사용
+            print(f"   - Training mode: LoRA Fine-tuning (with Unsloth)")
+            print(f"   - Load in 4bit: {args.load_in_4bit}")
+            print(f"   - LoRA alpha: {args.lora_alpha}")
+            
+            self.model, self.tokenizer = FastLanguageModel.from_pretrained(
+                model_name=args.model_name,
+                max_seq_length=args.max_length,
+                dtype=None,  # Auto-detect optimal dtype
+                load_in_4bit=args.load_in_4bit,
+                # token = "hf_...", # use one if using gated models like meta-llama/Llama-2-7b-hf
+            )
+            
+            # LoRA 어댑터 추가
+            print(f"🔧 Adding LoRA adapters (r={args.lora_r}, alpha={args.lora_alpha})...")
+            self.model = FastLanguageModel.get_peft_model(
+                self.model,
+                r=args.lora_r,  # LoRA rank
+                target_modules=["q_proj", "k_proj", "v_proj", "o_proj",
+                              "gate_proj", "up_proj", "down_proj"],
+                lora_alpha=args.lora_alpha,
+                lora_dropout=args.lora_dropout,
+                bias="none",
+                use_gradient_checkpointing="unsloth",  # Unsloth optimized gradient checkpointing
+                random_state=args.seed,
+                use_rslora=False,  # Rank stabilized LoRA
+                loftq_config=None,  # LoftQ quantization
+            )
+            
+            print(f"✓ Model loaded with Unsloth optimization")
+            self.use_unsloth = True
+        
         if self.tokenizer.pad_token is None:
             self.tokenizer.pad_token = self.tokenizer.eos_token
         
-        # 모델 로드
-        print(f"🤖 Loading model: {args.model_name}")
-        self.model = AutoModelForCausalLM.from_pretrained(
-            args.model_name,
-            trust_remote_code=True,
-        )
+        if self.tokenizer.pad_token is None:
+            self.tokenizer.pad_token = self.tokenizer.eos_token
         
         # GRPO Config
         grpo_config = GRPOConfig(
@@ -134,7 +182,8 @@ class GRPOTrainerWrapper:
             save_total_limit=args.save_total_limit,
             max_grad_norm=args.max_grad_norm,
             seed=args.seed,
-            bf16=args.bf16,
+            bf16=is_bfloat16_supported(),  # Auto-detect BF16 support
+            fp16=not is_bfloat16_supported(),  # Use FP16 if BF16 not supported
             report_to=args.report_to if args.report_to != "none" else None,
             run_name=args.run_name,
             # GRPO specific
@@ -142,11 +191,11 @@ class GRPOTrainerWrapper:
             temperature=args.temperature,
             max_completion_length=args.max_new_tokens,
             max_steps=args.max_steps,
-            include_for_metrics=["reward", "entropy", "grad_norm", "epoch"]
+            include_for_metrics=["reward", "entropy", "grad_norm", "epoch"],
+            # Optimization
+            optim="adamw_8bit" if args.use_8bit_adam else "adamw_torch",
+            gradient_checkpointing=True,
         )
-        
-        # GRPO Trainer
-
         
         # 데이터로더 생성 (create_dataloaders 함수 사용)
         (
@@ -157,37 +206,19 @@ class GRPOTrainerWrapper:
             self.item_metadata,
         ) = create_dataloaders(args, tokenizer=self.tokenizer)
         
+        # 리워드 함수
         print(f"💰 Creating reward function: {args.reward_type}@{args.k}")
-        if args.use_local_embedding:
-            print(f"  Using local embedding-based reward calculation")
-            self.reward_fn = LocalEmbeddingRewardFunction(
-                uid_2_target=self.train_dataset.target_dict,
-                data_name=args.data_name,
-                reward_type=args.reward_type,
-                k=args.k,
-                normalize=args.normalize_rewards,
-                emb_model_name=args.emb_model_name,
-                emb_type=args.emb_type,
-                device=args.device,
-                emb_batch_size=args.emb_batch_size,
-                novelty_reward=args.novelty_reward,
-                novelty_target_rank=args.novelty_target_rank,
-                novelty_mode=args.novelty_mode,
-                popularity_coef=args.popularity_coef,
-            )
-        else:
-            print(f"  Using RetrievalService-based reward calculation")
-            self.reward_fn = RecRewardFrunction(
-                retrieval_service_name=args.retrieval_service_name,
-                namespace=args.namespace,
-                data_name=args.data_name,
-                reward_type=args.reward_type,
-                k=args.k,
-                normalize=args.normalize_rewards,
-                test_target=args.test_target,
-            )
+        self.reward_fn = RecRewardFrunction(
+            retrieval_service_name=args.retrieval_service_name,
+            namespace=args.namespace,
+            data_name=args.data_name,
+            reward_type=args.reward_type,
+            k=args.k,
+            normalize=args.normalize_rewards,
+            test_target=args.test_target,
+        )
 
-        print(f"🎯 Initializing GRPO Trainer...")
+        print(f"🎯 Initializing GRPO Trainer with Unsloth model...")
         self.grpo_trainer = GRPOTrainerRecReward(
             model=self.model,
             args=grpo_config,
@@ -206,8 +237,14 @@ class GRPOTrainerWrapper:
         print("🧹 Cleaning up training resources before evaluation...")
         print(f"{'='*80}")
         
-        # GPU 메모리 정리 - 더 확실하게
+        # Unsloth 모델 저장 및 정리
         if hasattr(self, 'model') and self.model is not None:
+            print("💾 Saving Unsloth model before cleanup...")
+            # LoRA 어댑터만 저장
+            self.model.save_pretrained(self.args.final_checkpoint_dir)
+            self.tokenizer.save_pretrained(self.args.final_checkpoint_dir)
+            
+            # GPU 메모리 정리
             self.model.cpu()
             del self.model
             self.model = None
@@ -247,13 +284,25 @@ class GRPOTrainerWrapper:
         전체 학습 루프 실행
         """
         print("=" * 80)
-        print("🚀 Starting GRPO Training")
+        print("🚀 Starting GRPO Training with Unsloth")
         print("=" * 80)
 
         if self.args.num_epochs > 0:
+            # Unsloth 사용 여부에 따라 분기
+            if self.use_unsloth:
+                # Unsloth의 빠른 학습 활성화
+                FastLanguageModel.for_training(self.model)
+            
             self.grpo_trainer.train()
+            
         print("=" * 80)
-        print("✓ Training completed!")        
+        print("✓ Training completed!")
+        
+        # 최종 모델 저장
+        print(f"💾 Saving final model to {self.args.final_checkpoint_dir}")
+        self.model.save_pretrained(self.args.final_checkpoint_dir)
+        self.tokenizer.save_pretrained(self.args.final_checkpoint_dir)
+        
         # 최종 테스트 평가
         test_metrics = self.evaluate_final_metrics(self.test_dataset, split="test")
         
@@ -262,10 +311,10 @@ class GRPOTrainerWrapper:
 def parse_args():
     """Command line arguments"""
     parser = argparse.ArgumentParser(
-        description="GRPO Training for Recommendation System"
+        description="GRPO Training for Recommendation System (Unsloth Version)"
     )
     # basic
-    parser.add_argument("--run_name", type=str, default="grpo")
+    parser.add_argument("--run_name", type=str, default="grpo_unsloth")
     
     # Ray & Service
     parser.add_argument("--ray_address", type=str, default="auto")
@@ -274,13 +323,20 @@ def parse_args():
     parser.add_argument("--data_name", type=str, default="beauty")
     
     # Model
-    parser.add_argument("--model_name", type=str, default="google/gemma-3-1b-it")
+    parser.add_argument("--model_name", type=str, default="unsloth/gemma-2-2b-it-bnb-4bit")
     parser.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu")
-    parser.add_argument("--max_length", type=int, default=1024*4)
+    parser.add_argument("--max_length", type=int, default=2048, help="Max sequence length for Unsloth")
     parser.add_argument("--max_new_tokens", type=int, default=512)
     parser.add_argument("--max_emb_length", type=int, default=512)
     parser.add_argument("--temperature", type=float, default=1.0)
     parser.add_argument("--use_ref_model", action="store_true", help="Use reference model for KL penalty")
+    
+    # Unsloth & LoRA specific
+    parser.add_argument("--load_in_4bit", action="store_true", default=True, help="Load model in 4bit")
+    parser.add_argument("--lora_r", type=int, default=0, help="LoRA rank")
+    parser.add_argument("--lora_alpha", type=int, default=16, help="LoRA alpha")
+    parser.add_argument("--lora_dropout", type=float, default=0.0, help="LoRA dropout")
+    parser.add_argument("--use_8bit_adam", action="store_true", default=True, help="Use 8bit Adam optimizer")
     
     # Embedding Model for Evaluation
     parser.add_argument("--emb_model_name", type=str, default="mixedbread-ai/mxbai-embed-large-v1")
@@ -298,11 +354,11 @@ def parse_args():
     parser.add_argument("--use_features", action="store_true", help="Include features in prompt")
     parser.add_argument("--use_last_item", action="store_true", default=True, help="Emphasize last item")
     parser.add_argument("--max_history_len", type=int, default=8, help="Max history length")
-    parser.add_argument("--history_text_max_length", type=int, default=100, help="Max words per history item")
+    parser.add_argument("--history_text_max_length", type=int, default=512, help="Max words per history item")
     parser.add_argument("--test_target", action="store_true", help="Use target text for test")
     
     # GRPO Training
-    parser.add_argument("--learning_rate", type=float, default=1e-6)
+    parser.add_argument("--learning_rate", type=float, default=2e-4, help="Higher LR for LoRA")
     parser.add_argument("--batch_size", type=int, default=4)
     parser.add_argument("--eval_batch_size", type=int, default=16)
     parser.add_argument("--gradient_accumulation_steps", type=int, default=4)
@@ -311,7 +367,7 @@ def parse_args():
     parser.add_argument("--max_grad_norm", type=float, default=1.0)
     parser.add_argument("--num_epochs", type=int, default=3)
     parser.add_argument("--max_steps", type=int, default=5000)
-    parser.add_argument("--bf16", action="store_true", help="Use bfloat16")
+    parser.add_argument("--bf16", action="store_true", help="Use bfloat16 (auto-detected by Unsloth)")
     
     # Reward
     parser.add_argument("--reward_type", type=str, default="ndcg", choices=["ndcg", "hit", "mixed"])
@@ -319,30 +375,9 @@ def parse_args():
     parser.add_argument("--normalize_rewards", action="store_true", help="Normalize rewards")
     parser.add_argument("--num_negs", type=int, default=0, help="Number of negative items")
     
-    # Novelty Reward (popularity-based reward)
-    parser.add_argument("--novelty_reward", action="store_true",
-                        help="Use novelty reward: NDCG × popularity_weight "
-                             "(인기 없는 아이템을 높은 rank로 예측할수록 높은 보상)")
-    parser.add_argument("--novelty_target_rank", type=int, default=20,
-                        help="(Deprecated, not used)")
-    parser.add_argument("--novelty_mode", type=str, default="gaussian", 
-                        choices=["gaussian", "uniform", "inverse"],
-                        help="(Deprecated, not used)")
-    
-    # Popularity Reward (long-tail item bonus)
-    parser.add_argument("--popularity_coef", type=float, default=0.0,
-                        help="Popularity reward coefficient (0.0 = disabled). "
-                             "Rewards predicting unpopular items more.")
-    
-    # Local Embedding-based Reward (alternative to RetrievalService)
-    parser.add_argument("--use_local_embedding", action="store_true", 
-                        help="Use local embedding-based reward instead of RetrievalService")
-    parser.add_argument("--emb_batch_size", type=int, default=128,
-                        help="Batch size for embedding computation")
-    
     # Logging & Checkpointing
-    parser.add_argument("--checkpoint_dir", type=str, default="checkpoints/grpo")
-    parser.add_argument("--final_checkpoint_dir", type=str, default="checkpoints/grpo/checkpoint-5000")
+    parser.add_argument("--checkpoint_dir", type=str, default="checkpoints/grpo_unsloth")
+    parser.add_argument("--final_checkpoint_dir", type=str, default="checkpoints/grpo_unsloth/checkpoint-5000")
     parser.add_argument("--log_interval", type=int, default=10)
     parser.add_argument("--eval_interval", type=int, default=100)
     parser.add_argument("--save_interval", type=int, default=500)
@@ -369,7 +404,7 @@ def main():
     
     # Run name 설정
     if args.run_name is None:
-        args.run_name = f"grpo_{args.reward_type}@{args.k}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+        args.run_name = f"grpo_unsloth_{args.reward_type}@{args.k}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
     
     # Trainer 초기화 및 학습
     trainer = GRPOTrainerWrapper(args)
@@ -407,3 +442,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+

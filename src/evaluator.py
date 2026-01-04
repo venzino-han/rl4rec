@@ -11,7 +11,7 @@ from tqdm import tqdm
 from vllm import LLM, SamplingParams
 from vllm.pooling_params import PoolingParams
 
-from utils.reward_funtion import calculate_ndcg, calculate_hit_rate
+from utils.reward_function import calculate_ndcg, calculate_hit_rate
 
 
 class RecommendationEvaluator:

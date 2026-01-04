@@ -277,6 +277,7 @@ class RecommendationDataset(Dataset):
             num_negs: 사전 샘플링할 negative 아이템 수 (0이면 비활성화)
             num_items: 전체 아이템 수 (negative sampling에 필요)
         """
+        self.data_name = data_name
         self.item_metadata = item_metadata
         self.prompt_generator = prompt_generator
         self.split = split
@@ -299,12 +300,10 @@ class RecommendationDataset(Dataset):
             print("-" * 100)
         
         # Negative items 미리 샘플링 (초기화 시점)
-        self.neg_items_dict = {}
         if self.num_negs > 0:
             if self.num_items is None:
                 raise ValueError("num_items must be provided when num_negs > 0")
-            print(f"🎲 Pre-sampling {self.num_negs} negative items for each user...")
-            self._sample_negative_items()
+            self._load_negative_items()
         
         print(f"✓ {split.upper()} Dataset loaded: {len(self.user_ids)} users")
     
@@ -342,29 +341,24 @@ class RecommendationDataset(Dataset):
         self.history_dict = all_history
         self.target_dict = all_targets
     
-    def _sample_negative_items(self):
+    def _load_negative_items(self):
         """각 사용자별로 negative items 사전 샘플링"""
-        rng = np.random.RandomState(42)  # 재현성을 위한 고정 seed
+        negative_file = Path("data") / self.data_name / "negative.txt"
+        if not negative_file.exists():
+            raise FileNotFoundError(f"Negative pool file not found: {negative_file}")
         
-        for user_id in self.user_ids:
-            history = self.history_dict[user_id]
-            target = self.target_dict[user_id]
-            
-            # 제외할 아이템 (history + target)
-            excluded = set(history + [target])
-            
-            # 가능한 negative items (전체 아이템 - 제외 아이템)
-            all_items = set(range(self.num_items))
-            candidate_items = list(all_items - excluded)
-            
-            # 랜덤 샘플링
-            if len(candidate_items) >= self.num_negs:
-                neg_items = rng.choice(candidate_items, size=self.num_negs, replace=False).tolist()
-            else:
-                # 후보가 부족한 경우 중복 샘플링
-                neg_items = rng.choice(candidate_items, size=self.num_negs, replace=True).tolist()
-            
-            self.neg_items_dict[user_id] = neg_items
+        print(f"📦 Loading negative pool from: {negative_file}")
+        negative_pool = {}
+        
+        with open(negative_file, 'r') as f:
+            for line in f:
+                parts = line.strip().split()
+                user_id = int(parts[0])
+                neg_items = [int(item_id) for item_id in parts[1:]]
+                negative_pool[user_id] = neg_items[:self.num_negs]
+
+        self.neg_items_dict = negative_pool
+        
     
     def __len__(self):
         return len(self.user_ids)
