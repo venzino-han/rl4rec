@@ -6,6 +6,7 @@
 python3 src/retrieval_service.py \
     --emb_model_name "mixedbread-ai/mxbai-embed-large-v1" \
     --datasets beauty sports toys yelp \
+    --emb_type item_preference_1024_gemma-3-4b-it \
     --actor_name "RetrievalService" \
     --namespace "rl4rec" \
     --gpu_id 0 \

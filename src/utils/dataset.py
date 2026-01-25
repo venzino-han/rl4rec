@@ -8,6 +8,7 @@ import json
 import pickle
 import numpy as np
 import argparse
+import pandas as pd
 from pathlib import Path
 from typing import List, Dict, Optional, Tuple
 
@@ -39,12 +40,16 @@ class PromptGenerator:
         use_features: bool = False,
         use_last_item: bool = False,
         use_date: bool = True,
-        max_history_len: int = 5,
+        max_history_len: int = 8,
         history_text_max_length: int = 100,
         use_reviews: bool = False,
         days_filter: int = None,
         tokenizer = None,
         apply_chat_template: bool = True,
+        emphasize_recent_item: bool = False,
+        include_target_date: bool = False,
+        use_sasrec: bool = False,
+        sasrec_top_k: int = 5,
     ):
         """
         Args:
@@ -56,13 +61,17 @@ class PromptGenerator:
             use_description: 설명 정보 포함 여부
             use_features: 특징 정보 포함 여부
             use_last_item: 마지막 아이템 강조 여부
-            use_date: 날짜 정보 포함 여부
+            use_date: 날짜 정보 포함 여부 (히스토리 및 최근 구매 강조에 사용)
             max_history_len: 최대 히스토리 길이
             history_text_max_length: 히스토리 텍스트 최대 단어 수 (review text에도 적용)
             use_reviews: 리뷰 텍스트 포함 여부
             days_filter: 최근 N일 이내의 리뷰만 포함 (None이면 필터링 안함)
             tokenizer: 토크나이저 (챗 템플릿 적용에 필요, 선택적)
             apply_chat_template: 챗 템플릿 적용 여부
+            emphasize_recent_item: 최근 구매 아이템을 상세하게 강조할지 여부 ("This user's most recent purchase is..." 형식, use_date가 True면 구매 날짜도 포함)
+            include_target_date: 타겟/레이블 아이템의 구매 날짜를 프롬프트 마지막에 포함할지 여부
+            use_sasrec: SASRec 추천 결과를 프롬프트에 포함할지 여부
+            sasrec_top_k: SASRec 추천 결과에서 상위 K개 아이템만 포함
         """
         self.item_metadata = item_metadata
         self.data_name = data_name
@@ -70,7 +79,7 @@ class PromptGenerator:
         self.use_category = use_category
         self.use_description = use_description
         self.use_features = use_features
-        self.use_last_item = use_last_item
+        self.use_last_item = emphasize_recent_item
         self.use_date = use_date
         self.max_history_len = max_history_len
         self.history_text_max_length = history_text_max_length
@@ -78,6 +87,9 @@ class PromptGenerator:
         self.days_filter = days_filter
         self.tokenizer = tokenizer
         self.apply_chat_template = apply_chat_template
+        self.include_target_date = include_target_date
+        self.use_sasrec = use_sasrec
+        self.sasrec_top_k = sasrec_top_k
         
         # 프롬프트 타입 설정
         if prompt_type not in PROMPT_TEMPLATES:
@@ -100,8 +112,13 @@ class PromptGenerator:
             else:
                 print(f"⚠️  Date file not found: {date_file_path}. Dates will not be included.")
                 self.use_date = False
+        
+        # SASRec 추천 결과 로드
+        self.sasrec_predictions = {}
+        if self.use_sasrec and data_name:
+            print(f"🔍 SASRec recommendations will be loaded per split in RecommendationDataset")
     
-    def generate_prompt(self, item_ids: List[int], user_id: Optional[int] = None, target_timestamp: Optional[int] = None) -> str:
+    def generate_prompt(self, item_ids: List[int], user_id: Optional[int] = None, target_item_id: Optional[int] = None, sasrec_items: Optional[List[int]] = None) -> str:
         """
         사용자 시퀀스로부터 프롬프트 생성
         
@@ -109,6 +126,8 @@ class PromptGenerator:
             item_ids: 아이템 ID 리스트
             user_id: 사용자 ID (날짜 정보 조회용, 선택적)
             target_timestamp: 타겟 타임스탬프 (days_filter 적용시 기준, 선택적)
+            target_item_id: 타겟/레이블 아이템 ID (타겟 날짜 포함용, 선택적)
+            sasrec_items: SASRec 추천 아이템 ID 리스트 (선택적)
         
         Returns:
             생성된 프롬프트 문자열
@@ -137,9 +156,10 @@ class PromptGenerator:
                 # 메타데이터가 없는 경우 스킵
                 print(f"⚠️  Item metadata not found for item {item_id}")
                 continue
-            
+
+            target_timestamp = int(item_to_review[target_item_id].get('timestamp', 0))
             # 시간 필터링 (days_filter가 설정되어 있고 target_timestamp가 주어진 경우)
-            if self.days_filter is not None and target_timestamp is not None and item_id in item_to_review:
+            if self.days_filter is not None:
                 review = item_to_review[item_id]
                 timestamp = int(review.get('timestamp', 0))
                 if target_timestamp - timestamp > self.days_filter * 24 * 60 * 60:
@@ -234,11 +254,48 @@ class PromptGenerator:
         # 선택된 프롬프트 템플릿 가져오기
         template = PROMPT_TEMPLATES[self.prompt_type]
         
+        # 타겟 아이템 날짜 추가
+        target_date = ""
+        if self.include_target_date and target_item_id is not None:
+            if target_item_id in item_to_review:
+                target_date = item_to_review[target_item_id].get('date', '')
+            
+            if target_date:
+                target_date = f"- **Target Purchase Date:**: {target_date}\n"
+        
+        # SASRec 추천 결과 섹션 생성
+        sasrec_section = ""
+        if self.use_sasrec and sasrec_items and len(sasrec_items) > 0:
+            # 프롬프트 템플릿에서 sasrec_section이 있는지 확인
+            template = PROMPT_TEMPLATES[self.prompt_type]
+            if 'sasrec_section' in template:
+                sasrec_section = template['sasrec_section']
+                
+                # SASRec 추천 아이템들의 정보를 텍스트로 변환
+                sasrec_text_list = []
+                for idx, item_id in enumerate(sasrec_items[:self.sasrec_top_k]):
+                    item_data = self.item_metadata.get(item_id)
+                    if item_data is None:
+                        continue
+                    
+                    item_title = item_data.get('title', 'Unknown Item')
+                    # limit title length to 100 words
+                    item_title = " ".join(item_title.split()[:100])
+                    
+                    sasrec_item_text = f"{idx+1}. {item_title}"
+                    sasrec_text_list.append(sasrec_item_text)
+                
+                if sasrec_text_list:
+                    sasrec_section += "\n" + "\n".join(sasrec_text_list) + "\n\n"
+        
         # 최종 프롬프트 생성
         prompt = (
-            f"{template['title']}\n\n"
-            f"{history_text}\n\n"
-            f"{template['task']}\n"
+            f"{template['head']}\n\n"
+            f"{target_date}\n"
+            f"- **User Purchase History:**\n"
+            f"{history_text}\n"
+            f"{sasrec_section}"
+            f"{template['tail']}\n"
         )
         
         # 챗 템플릿 적용
@@ -287,12 +344,40 @@ class RecommendationDataset(Dataset):
         sequential_file = f"data/{data_name}/sequential_data.txt"
         self._load_real_data(sequential_file, split)
         
+        # SASRec 추천 결과 로드 (use_sasrec이 True인 경우에만)
+        self.sasrec_predictions = {}
+        if self.prompt_generator.use_sasrec:
+            sasrec_file = f"sasrec_results/SASRec_{data_name}_{split}_topk_prediction.json"
+            if os.path.exists(sasrec_file):
+                print(f"📦 Loading SASRec predictions from: {sasrec_file}")
+                with open(sasrec_file, 'r') as f:
+                    sasrec_data = json.load(f)
+                    # Convert keys to int and extract only item IDs (first element of each [item_id, score] pair)
+                    self.sasrec_predictions = {
+                        int(k): [item[0] for item in v] 
+                        for k, v in sasrec_data.items()
+                    }
+                print(f"✓ Loaded SASRec predictions for {len(self.sasrec_predictions)} users")
+            else:
+                print(f"⚠️  SASRec prediction file not found: {sasrec_file}. SASRec recommendations will not be included.")
+                self.prompt_generator.use_sasrec = False
+        
         # 프롬프트 미리 생성 (초기화 시점)
         print(f"✍️  Pre-generating prompts for {len(self.user_ids)} users...")
         self.prompt_dict = {}
         for user_id in self.user_ids:
             history = self.history_dict[user_id]
-            self.prompt_dict[user_id] = self.prompt_generator.generate_prompt(history, user_id=user_id)
+            target_item_id = self.target_dict[user_id]
+            
+            # SASRec 추천 결과 가져오기 (있는 경우)
+            sasrec_items = self.sasrec_predictions.get(user_id, []) if self.prompt_generator.use_sasrec else None
+            
+            self.prompt_dict[user_id] = self.prompt_generator.generate_prompt(
+                history, 
+                user_id=user_id, 
+                target_item_id=target_item_id,
+                sasrec_items=sasrec_items,
+            )
 
         # print sample prompts
         for user_id in [10, 20, 30]:
@@ -340,6 +425,68 @@ class RecommendationDataset(Dataset):
         self.user_ids = all_user_ids
         self.history_dict = all_history
         self.target_dict = all_targets
+    
+    def filter_by_rank(self, csv_path: str, rank_min: Optional[int] = None, rank_max: Optional[int] = None):
+        """
+        평가 결과 CSV의 rank 범위를 기반으로 데이터셋 필터링
+        
+        Args:
+            csv_path: 평가 결과 CSV 파일 경로 (user_id, rank 컬럼 포함)
+            rank_min: 최소 rank (None이면 제한 없음)
+            rank_max: 최대 rank (None이면 제한 없음)
+        """
+        if not os.path.exists(csv_path):
+            raise FileNotFoundError(f"CSV file not found: {csv_path}")
+        
+        print(f"\n{'='*80}")
+        print(f"🔍 Filtering dataset by rank range")
+        print(f"{'='*80}")
+        print(f"  CSV file: {csv_path}")
+        print(f"  Rank range: [{rank_min if rank_min is not None else 'None'}, {rank_max if rank_max is not None else 'None'}]")
+        print(f"  Original size: {len(self.user_ids)} users")
+        
+        # CSV 로드
+        df = pd.read_csv(csv_path)
+        
+        # 필수 컬럼 확인
+        if 'user_id' not in df.columns or 'rank' not in df.columns:
+            raise ValueError(f"CSV must contain 'user_id' and 'rank' columns. Found: {df.columns.tolist()}")
+        
+        # rank 범위 필터링
+        mask = pd.Series([True] * len(df))
+        if rank_min is not None:
+            mask &= (df['rank'] >= rank_min)
+        if rank_max is not None:
+            mask &= (df['rank'] <= rank_max)
+        
+        filtered_df = df[mask]
+        
+        # 필터링된 user_id 세트
+        filtered_user_ids = set(filtered_df['user_id'].tolist())
+        
+        print(f"  Filtered users from CSV: {len(filtered_user_ids)} users")
+        
+        # 데이터셋 필터링
+        original_count = len(self.user_ids)
+        self.user_ids = [uid for uid in self.user_ids if uid in filtered_user_ids]
+        
+        # 히스토리와 타겟도 필터링
+        filtered_history = {uid: hist for uid, hist in self.history_dict.items() if uid in filtered_user_ids}
+        filtered_target = {uid: tgt for uid, tgt in self.target_dict.items() if uid in filtered_user_ids}
+        
+        self.history_dict = filtered_history
+        self.target_dict = filtered_target
+        
+        # 프롬프트도 필터링 (이미 생성된 경우)
+        if hasattr(self, 'prompt_dict'):
+            self.prompt_dict = {uid: prompt for uid, prompt in self.prompt_dict.items() if uid in filtered_user_ids}
+        
+        # negative items도 필터링 (있는 경우)
+        if hasattr(self, 'neg_items_dict'):
+            self.neg_items_dict = {uid: items for uid, items in self.neg_items_dict.items() if uid in filtered_user_ids}
+        
+        print(f"  Filtered size: {len(self.user_ids)} users (removed {original_count - len(self.user_ids)} users)")
+        print(f"{'='*80}\n")
     
     def _load_negative_items(self):
         """각 사용자별로 negative items 사전 샘플링"""
@@ -472,6 +619,21 @@ def create_dataloaders(
     # prompt_type 파라미터 가져오기 (args에 있으면 사용, 없으면 'recent_preference')
     prompt_type = getattr(args, 'prompt_type', 'seq_rec')
     
+    # emphasize_recent_item 파라미터 가져오기 (args에 있으면 사용, 없으면 False)
+    emphasize_recent_item = getattr(args, 'emphasize_recent_item', False)
+    
+    # include_target_date 파라미터 가져오기 (args에 있으면 사용, 없으면 False)
+    include_target_date = getattr(args, 'include_target_date', False)
+    
+    # use_sasrec 파라미터 가져오기 (args에 있으면 사용, 없으면 False)
+    use_sasrec = getattr(args, 'use_sasrec', False)
+    
+    # sasrec_top_k 파라미터 가져오기 (args에 있으면 사용, 없으면 5)
+    sasrec_top_k = getattr(args, 'sasrec_top_k', 5)
+    
+    # days_filter 파라미터 가져오기 (args에 있으면 사용, 없으면 None)
+    days_filter = getattr(args, 'days_filter', None)
+    
     prompt_generator = PromptGenerator(
         item_metadata=item_metadata,
         data_name=args.data_name,
@@ -482,14 +644,20 @@ def create_dataloaders(
         use_date=use_date,
         max_history_len=args.max_history_len,
         history_text_max_length=args.history_text_max_length,
+        days_filter=days_filter,
         tokenizer=tokenizer,
         apply_chat_template=apply_chat_template,
+        emphasize_recent_item=emphasize_recent_item,
+        include_target_date=include_target_date,
+        use_sasrec=use_sasrec,
+        sasrec_top_k=sasrec_top_k,
     )
     
     # 데이터셋 생성
     print(f"📊 Creating datasets...")
     
-    # Train dataset
+    # if args.num_epochs > 0:
+        # Train dataset
     train_dataset = RecommendationDataset(
         data_name=args.data_name,
         item_metadata=item_metadata,
@@ -498,6 +666,13 @@ def create_dataloaders(
         num_negs=num_negs,
         num_items=num_items,
     )
+    
+    # Train dataset 필터링 (rank 범위 기반)
+    filter_train_csv = getattr(args, 'filter_train_csv', None)
+    if filter_train_csv is not None:
+        rank_min = getattr(args, 'rank_min', None)
+        rank_max = getattr(args, 'rank_max', None)
+        train_dataset.filter_by_rank(filter_train_csv, rank_min, rank_max)
     
     # Valid dataset
     valid_dataset = RecommendationDataset(
@@ -509,19 +684,13 @@ def create_dataloaders(
         num_items=num_items,
     )
     
-    # Test dataset
-    test_dataset = RecommendationDataset(
-        data_name=args.data_name,
-        item_metadata=item_metadata,
-        prompt_generator=prompt_generator,
-        split="test",
-        num_negs=num_negs,
-        num_items=num_items,
-    )
-    
-    # DataLoaders
-    print(f"🔄 Creating dataloaders...")
-    
+    # Valid dataset 필터링 (선택사항)
+    filter_valid_csv = getattr(args, 'filter_valid_csv', None)
+    if filter_valid_csv is not None:
+        rank_min = getattr(args, 'rank_min', None)
+        rank_max = getattr(args, 'rank_max', None)
+        valid_dataset.filter_by_rank(filter_valid_csv, rank_min, rank_max)
+        
     train_dataloader = DataLoader(
         train_dataset,
         batch_size=args.batch_size,
@@ -535,7 +704,25 @@ def create_dataloaders(
         shuffle=False,
         collate_fn=collate_fn,
     )
+    print(f"  Train samples: {len(train_dataset)}")
+    print(f"  Valid samples: {len(valid_dataset)}")
+
+    test_dataset = RecommendationDataset(
+        data_name=args.data_name,
+        item_metadata=item_metadata,
+        prompt_generator=prompt_generator,
+        split="test",
+        num_negs=num_negs,
+        num_items=num_items,
+    )
     
+    # Test dataset 필터링 (선택사항)
+    filter_test_csv = getattr(args, 'filter_test_csv', None)
+    if filter_test_csv is not None:
+        rank_min = getattr(args, 'rank_min', None)
+        rank_max = getattr(args, 'rank_max', None)
+        test_dataset.filter_by_rank(filter_test_csv, rank_min, rank_max)
+
     test_dataloader = DataLoader(
         test_dataset,
         batch_size=args.eval_batch_size,
@@ -544,8 +731,7 @@ def create_dataloaders(
     )
     
     print(f"✓ DataLoaders created:")
-    print(f"  Train samples: {len(train_dataset)}")
-    print(f"  Valid samples: {len(valid_dataset)}")
+
     print(f"  Test samples: {len(test_dataset)}")
     if num_negs > 0:
         print(f"  Negative samples per user: {num_negs}")

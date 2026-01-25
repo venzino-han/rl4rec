@@ -84,7 +84,27 @@ def process_item_features(args):
         ]
 
     ## Single target or multiple targets
-    if args.target == "preference":
+    if args.target == "item_meta_only":
+        # only use item metadata (title, brand, category, description)
+        item_text_formated = {}
+        for item_id, meta in item_meta.items():
+            title = meta.get("title", "None")
+            brand = meta.get("brand", "None")
+            category = meta.get("category", "None")
+            description = meta.get("description", "None")
+            
+            # limit description to specified token limit (default: 128 words)
+            if args.description_word_limit > 0:
+                description = " ".join(description.split()[:args.description_word_limit])
+            
+            # Format metadata into text
+            meta_text = f"Title: {title}\n" + \
+                        f"Brand: {brand}\n" + \
+                        f"Category: {category}\n" + \
+                        f"Description: {description}"
+            item_text_formated[item_id] = meta_text
+    
+    elif args.target == "preference":
         # load f"data_processed/item_pref_text_dict_{data_name}.json"
         pref_file = f"data_processed/item_pref_text_dict_{data_name}.json"
         with open(pref_file, 'r') as f:
@@ -102,7 +122,7 @@ def process_item_features(args):
     elif args.target in FEATURE_BASED_TARGETS:
         # load f"data_processed/item_summary_text_dict_{data_name}.json"
         summary_file = f"data_processed/{data_name}_{args.model_name}_item_{args.target}.json"
-        output_file = f"data_emb/{data_name}_{args.target}_{args.token_limit}_{args.model_name}_{model_dir_name}_emb.pt"
+        output_file = f"data_emb/{data_name}_{args.target}_{args.model_name}_{model_dir_name}_emb.pt"
 
         with open(summary_file, 'r') as f:
             item_summary_text_dict = json.load(f)
@@ -296,6 +316,7 @@ def main():
     parser.add_argument("--add_item_meta", action="store_true", help="Add item meta information to the embeddings.")
     parser.add_argument("--token_limit", type=int, default=1024, help="Token limit for the model.")
     parser.add_argument("--use_sentence_transformers", action="store_true", help="Use SentenceTransformers for embedding extraction.")
+    parser.add_argument("--description_word_limit", type=int, default=128, help="Word limit for item description when using item_meta_only target.")
     args = parser.parse_args()
 
     args.target_list = args.target.split("_")

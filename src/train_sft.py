@@ -1,3 +1,9 @@
+#!/usr/bin/env python3
+"""
+SFT Training Script for Recommendation System
+Supervised Fine-Tuning using TRL's SFTTrainer
+"""
+
 import torch
 import argparse
 import gc
@@ -35,210 +41,130 @@ from utils.common import (
     generate_response_with_vllm,
     initialize_tokenizer,
     )
-from utils.dataset import PromptGenerator, PROMPT_TEMPLATES
+from utils.dataset import create_dataloaders
 from evaluator import RecommendationEvaluator
 
 # off warning messages
 import warnings
 warnings.filterwarnings("ignore") 
 
-import argparse
-
-def get_item_meta(args):
-    """아이템 메타데이터 로드"""
-    input_file = f"data/{args.data_name}/meta_text_fix.json"
-    with open(input_file, 'r') as f:
-        item_metadata = json.load(f)
-    item_metadata = {int(k): v for k, v in item_metadata.items()}
-    return item_metadata
-
-def get_uid_to_seq_data(args):
-    """시퀀셜 데이터 로드"""
-    sequential_file = f"data/{args.data_name}/sequential_data.txt"
+def generate_target_text_from_metadata(target_dict, item_metadata, use_brand=True, use_category=True):
+    """
+    타겟 아이템의 메타데이터만을 사용하여 타겟 텍스트 생성
     
-    train_user_seq_data = {}
-    train_pos_item_ids = {}
-    train_user_target = {}
+    Args:
+        target_dict: {user_id: target_item_id} 딕셔너리
+        item_metadata: 아이템 메타데이터
+        use_brand: 브랜드 포함 여부
+        use_category: 카테고리 포함 여부
     
-    val_user_seq_data = {}
-    val_pos_item_ids = {}
-    val_user_target = {}
+    Returns:
+        target_text_list: 타겟 텍스트 리스트 (user_id 순서대로)
+    """
+    target_text_list = []
     
-    test_user_seq_data = {}
-    test_pos_item_ids = {}
-    test_user_target = {}
-    
-    with open(sequential_file, "r") as f:
-        for line in f:
-            parts = [int(p) for p in line.strip().split()]
-            user_id = parts[0]
-            items = parts[1:]
-            
-            # train: up to -3
-            train_history = items[:-3]
-            train_target_item = items[-3]
-            train_user_seq_data[user_id] = train_history
-            train_pos_item_ids[user_id] = train_history
-            train_user_target[user_id] = train_target_item
-            
-            # valid: up to -2
-            val_history = items[:-2]
-            val_target_item = items[-2]
-            val_user_seq_data[user_id] = val_history
-            val_pos_item_ids[user_id] = val_history
-            val_user_target[user_id] = val_target_item
-            
-            # test: up to -1
-            test_history = items[:-1]
-            test_target_item = items[-1]
-            test_user_seq_data[user_id] = test_history
-            test_pos_item_ids[user_id] = test_history
-            test_user_target[user_id] = test_target_item
-    
-    return (
-        train_user_seq_data, val_user_seq_data, test_user_seq_data,
-        train_pos_item_ids, val_pos_item_ids, test_pos_item_ids,
-        train_user_target, val_user_target, test_user_target
-    )
-
-def load_filtered_users(file_path):
-    """Load filtered user IDs from embedding comparison JSON file"""
-    if not file_path or not os.path.exists(file_path):
-        return None
-    
-    with open(file_path, 'r') as f:
-        data = json.load(f)
-    
-    filtered_user_ids = set(data['top_user_ids'])
-    print(f"Loaded {len(filtered_user_ids)} filtered users from {file_path}")
-    print(f"  Threshold similarity: {data.get('threshold_similarity', 'N/A')}")
-    print(f"  Mean similarity: {data.get('mean_similarity', 'N/A')}")
-    
-    return filtered_user_ids
-
-def get_user_text(args, user_seq_data, user_preference, item_meta, 
-                  user_to_target_item=None, add_item_meta=False, 
-                  add_target_item_meta=False):
-    """사용자 타겟 텍스트 생성"""
-    user_text_list = []
-    
-    for user_id in sorted(user_seq_data.keys()):
-        if user_id not in user_preference:
-            user_text_list.append("")
-            continue
-            
-        text = user_preference[user_id]
+    for user_id in sorted(target_dict.keys()):
+        target_item_id = target_dict[user_id]
+        item_info = item_metadata[target_item_id]
+        text_parts = []
         
-        # 필요시 타겟 아이템 메타데이터 추가
-        if add_target_item_meta and user_to_target_item and user_id in user_to_target_item:
-            target_item = user_to_target_item[user_id]
-            if target_item in item_meta:
-                item_info = item_meta[target_item]
-                text += f"\n\nTarget Item:\nTitle: {item_info.get('title', '')}\n"
-                text += f"Brand: {item_info.get('brand', '')}\n"
-                text += f"Category: {item_info.get('category', '')}"
+        title = item_info.get('title', '')
+        # limit title length to 64 words
+        title = " ".join(title.split()[:64])
+        text_parts.append(title)
         
-        user_text_list.append(text)
+        if use_brand:
+            brand = item_info.get('brand', '')
+            text_parts.append(f"Brand: {brand}")
+        
+        if use_category:
+            category = item_info.get('category', '')
+            text_parts.append(f"Category: {category}")
+        
+        target_text = "\n".join(text_parts)
+        target_text_list.append(target_text)
     
-    return user_text_list
+    return target_text_list
 
-def get_time_aware_user_history_text(args, split="train", item_meta=None, prefix=""):
-    """PromptGenerator를 사용하여 사용자 히스토리 텍스트 생성"""
-    # user2reviews 로드
-    reviews_file = f"data/{args.data_name}/user2reviews_with_date.json"
-    with open(reviews_file, 'r') as f:
-        user2reviews = json.load(f)
-    user2reviews = {int(k): v for k, v in user2reviews.items()}
-    
-    # PromptGenerator 생성
-    prompt_generator = PromptGenerator(
-        item_metadata=item_meta,
-        data_name=args.data_name,
-        prompt_type='seq_rec',  # 기본 프롬프트 타입
-        use_brand=True,
-        use_category=True,
-        use_description=False,
-        use_features=False,
-        use_last_item=True,
-        use_date=True,
-        max_history_len=args.max_history_len,
-        history_text_max_length=100,
-        use_reviews=False,
-        days_filter=args.days,
-    )
-    
-    # 분할 인덱스 결정
-    if split == "train":
-        index = -3
-    elif split == "valid":
-        index = -2
-    elif split == "test":
-        index = -1
+
+def remove_prefix_from_target_text(target_text):
+    """
+    Remove prefix from target text
+    """
+    if ":" in target_text:
+        return " ".join(target_text.split(":")[-1:])
     else:
-        raise ValueError(f"Invalid split: {split}")
+        return target_text
+
+def load_target_text_from_file(args, split="train"):
+    """
+    파일에서 타겟 텍스트 로드 (기존 방식)
     
-    # 사용자별 프롬프트 생성
-    uid_to_prompt = {}
-    for user_id, reviews in user2reviews.items():
-        if len(reviews) < abs(index):
-            # 리뷰가 충분하지 않은 경우 스킵
+    Args:
+        args: 학습 설정 파라미터
+        split: 데이터셋 split ('train', 'valid', 'test')
+    
+    Returns:
+        target_text_dict: {user_id: target_text} 딕셔너리
+    """
+    target_file = f"data_processed/{args.data_name}_{args.target_model_name}_{split}_{args.target}.json"
+    print(f"📄 Loading target text from: {target_file}")
+    
+    with open(target_file, 'r') as f:
+        target_text = json.load(f)
+    
+    target_text_dict = {int(k): remove_prefix_from_target_text(v) for k, v in target_text.items()}
+    print(f"✓ Loaded target text for {len(target_text_dict)} users")
+    
+    return target_text_dict
+
+
+def prepare_sft_dataset(dataset, target_text_dict):
+    """
+    SFT를 위한 데이터셋 준비
+    
+    Args:
+        dataset: RecommendationDataset 인스턴스
+        target_text_dict: {user_id: target_text} 딕셔너리
+    
+    Returns:
+        Dataset: HuggingFace Dataset (prompt, completion 컬럼 포함)
+    """
+    prompts = []
+    completions = []
+    
+    for i in range(len(dataset)):
+        data = dataset[i]
+        user_id = data['user_id']
+        prompt = data['prompt']
+        
+        # 타겟 텍스트 가져오기
+        target_text = target_text_dict.get(user_id, "")
+        
+        if not target_text:
+            # 타겟 텍스트가 없는 경우 스킵
             continue
-            
-        target_timestamp = int(reviews[index]["timestamp"])
-        # 히스토리 아이템 ID 추출
-        history_item_ids = [int(review["item_id"]) for review in reviews[:index]]
         
-        # 히스토리 길이 제한 적용
-        if len(history_item_ids) > args.max_history_len:
-            history_item_ids = history_item_ids[-args.max_history_len:]
-        
-        # PromptGenerator를 사용하여 히스토리 텍스트 생성
-        history_text = prompt_generator.generate_prompt(
-            item_ids=history_item_ids,
-            user_id=user_id,
-            target_timestamp=target_timestamp
-        )
-        
-        # prefix 추가
-        if prefix:
-            history_text = prefix + history_text
-        
-        uid_to_prompt[user_id] = history_text
+        prompts.append(prompt)
+        completions.append(target_text)
     
-    return uid_to_prompt
-
-def get_formatted_prompt_list(args, uid_to_prompt):
-    prompt_list = []
-    tokenizer = initialize_tokenizer(args.model_name)
-    for uid in range(1, len(uid_to_prompt)+1):
-        prompt = uid_to_prompt[uid]
-        prompt = tokenizer.apply_chat_template(
-            [{"role": "user", "content": prompt}],
-            tokenize=False,
-            add_generation_prompt=True,
-        )
-        if "Qwen" in args.model_name:
-            # don't use thinking
-            prompt += "<think> </think>"
-        prompt_list.append(prompt)
-    return prompt_list
-
-
-def get_dataset(
-        prompt_list: List[str],
-        label_text_list: List[str],
-    ) -> Dataset:
+    # 샘플 출력
+    print("\n" + "="*80)
+    print("📝 Sample Data:")
+    print("="*80)
+    for i in [10, 20, 30]:
+        if i < len(prompts):
+            print(f"\n--- Sample {i+1} ---")
+            print("Prompt:")
+            print(prompts[i])
+            print("\nCompletion:")
+            print(completions[i])
+            print("-" * 80)
         
     data_df = pd.DataFrame({
-        "prompt": prompt_list,
-        "completion": label_text_list,
+        "prompt": prompts,
+        "completion": completions,
     })
-
-    for i in [10, 20, 30]:
-        print("Prompt "+"-"*30)
-        print(prompt_list[i][-300:])
-        print("Label "+"-"*30)
-        print(label_text_list[i])
     
     return Dataset.from_pandas(data_df)
 
@@ -267,163 +193,64 @@ def get_quantization_config(args):
     return quantization_config
 
 
-def generate_responses(model, tokenizer, args, batch_prompts):
+def get_last_item_text(dataset, item_metadata, use_brand=True, use_category=True):
     """
-    Generate 20 responses for each prompt in batch_prompts using beam search.
-    """
-    inputs = tokenizer(
-            batch_prompts, 
-            return_tensors="pt", 
-            padding=True, 
-            truncation=True,
-            max_length=args.max_input_tokens,
-        ).to(args.device)
-    input_lengths = inputs["input_ids"].shape[1]
-
-    generated_tokens = model.generate(
-        **inputs,
-        max_new_tokens=args.max_output_tokens,
-        # num_beams=20,  # Apply beam search
-        num_return_sequences=1,  # Generate 20 results per prompt
-        pad_token_id=tokenizer.pad_token_id,
-    )
-
-    # Reshape generated tokens to match the batch size
-    batch_size = len(batch_prompts)
-    generated_tokens = generated_tokens.view(batch_size, -1)
-
-    # Decode all responses in the batch at once
-    decoded_responses = tokenizer.batch_decode(
-        generated_tokens[:, input_lengths:],
-        skip_special_tokens=True
-    )
-
-    return decoded_responses
-
-
-def generate_lora_responses_with_vllm(
-        args, 
-        prompt_list,
-        temp_dir="temp",
-    ):
-    """
-    LoRA를 사용한 응답 생성 (현재 미사용)
-    """
-    response_list = []
-    
-    os.makedirs(temp_dir, exist_ok=True)
-
-    # Initialize VLLM LLM
-    llm = LLM(
-        model=args.model_name,
-        dtype=torch.bfloat16,  # Change dtype if needed
-        trust_remote_code=True,
-        quantization="bitsandbytes" if args.quantization_option == "4bit" else None,
-        load_format="bitsandbytes" if args.quantization_option == "4bit" else "auto",
-        enable_lora=True,
-        gpu_memory_utilization = args.gpu_memory_utilization,
-        max_model_len=args.max_input_tokens,
-    )
-
-    # Define sampling parameters
-    sampling_params = SamplingParams(
-        n=1,
-        temperature=0.1,
-        max_tokens=args.max_output_tokens,
-        stop=["<|eot_id|>", "<|reserved_special_token_0|>", "<eos>"]
-    )
-
-    outputs = llm.generate(
-        prompt_list,
-        sampling_params,
-        lora_request=LoRARequest(
-            lora_name="all-linear",
-            lora_int_id=1,
-            lora_local_path=f"models/{args.run_name}_{args.data_name}_{args.model_name_dir}",
-            base_model_name=args.model_name,
-        )
-    )
-    
-    for output in outputs:
-        response_list.append(output.outputs[0].text)
-
-    return pd.DataFrame({
-        "prompt": prompt_list,
-        "response": response_list,
-    })
-
-def generate_responses_with_vllm(
-        args, 
-        prompt_list,
-    ):
-    # Initialize VLLM LLM
-    llm = LLM(
-        model=f"models/{args.run_name}_{args.data_name}_{args.model_name_dir}",
-        tensor_parallel_size=1,
-        dtype=torch.bfloat16,
-        gpu_memory_utilization = args.gpu_memory_utilization,
-        tokenizer=args.model_name,
-        max_model_len=args.max_input_tokens,
-        max_num_seqs=args.eval_batch_size,
-    )
-
-    # Define sampling parameters
-    sampling_params = SamplingParams(
-        n=1,
-        temperature=0.01,
-        max_tokens=args.max_output_tokens,
-        stop=["<|eot_id|>", "<|reserved_special_token_0|>", "<eos>"]
-    )
-
-    outputs = llm.generate(
-        prompt_list,
-        sampling_params,
-    )
-    responses = [output.outputs[0].text for output in outputs]
-
-    response_dict = {}
-    for i, res in enumerate(responses):
-        response_dict[i+1] = res
-    return response_dict
-
-
-def prepare_eval_dataset(prompt_list, user_seq_data, user_target):
-    """
-    평가를 위한 데이터셋 준비
+    각 사용자의 마지막 구매 아이템 정보를 텍스트로 변환
     
     Args:
-        prompt_list: 프롬프트 리스트
-        user_seq_data: 사용자별 시퀀스 데이터 (히스토리)
-        user_target: 사용자별 타겟 아이템
+        dataset: RecommendationDataset 인스턴스
+        item_metadata: 아이템 메타데이터
+        use_brand: 브랜드 포함 여부
+        use_category: 카테고리 포함 여부
     
     Returns:
-        eval_data: 평가용 데이터 리스트 (각 항목은 dict)
+        last_item_texts: 각 샘플의 마지막 아이템 텍스트 리스트
     """
-    eval_data = []
+    last_item_texts = []
     
-    for user_id in sorted(user_seq_data.keys()):
-        # user_id는 1-indexed
-        idx = user_id - 1
-        if idx >= len(prompt_list):
-            continue
+    for i in range(len(dataset)):
+        data = dataset[i]
+        history = data.get('history', [])
+        
+        if len(history) > 0:
+            last_item_id = history[-1]  # 마지막 아이템
+            item_info = item_metadata.get(last_item_id, {})
             
-        eval_data.append({
-            'prompt': prompt_list[idx],
-            'target': user_target[user_id],
-            'history': user_seq_data[user_id],
-        })
+            text_parts = []
+            title = item_info.get('title', '')
+            # limit title length to 64 words
+            title = " ".join(title.split()[:64])
+            text_parts.append(f"Last Item: {title}")
+            
+            if use_brand:
+                brand = item_info.get('brand', '')
+                if brand:
+                    text_parts.append(f"Brand: {brand}")
+            
+            if use_category:
+                category = item_info.get('category', '')
+                if category:
+                    text_parts.append(f"Category: {category}")
+            
+            last_item_text = "\n".join(text_parts)
+        else:
+            last_item_text = ""
+        
+        last_item_texts.append(last_item_text)
     
-    return eval_data
+    return last_item_texts
 
 
-def evaluate_model(args, eval_data, split="test"):
+def evaluate_final_metrics(args, dataset, split="test", pre_generated_texts=None, item_metadata=None):
     """
-    학습된 모델을 평가
+    최종 평가: RecommendationEvaluator를 사용하여 평가
     
     Args:
         args: 학습 설정 파라미터
-        eval_data: 평가용 데이터셋
+        dataset: RecommendationDataset 인스턴스
         split: 데이터셋 split 이름
+        pre_generated_texts: 미리 생성된 텍스트 리스트 (선택사항)
+        item_metadata: 아이템 메타데이터 (prepend_last_item 사용 시 필요)
     
     Returns:
         results: 평가 결과 딕셔너리
@@ -433,17 +260,52 @@ def evaluate_model(args, eval_data, split="test"):
     print(f"{'='*80}")
     
     # GPU 메모리 정리
+    print("🧹 Cleaning up training resources before evaluation...")
     torch.cuda.empty_cache()
     gc.collect()
     
-    # Evaluator 설정을 위한 args 준비
-    # args에 필요한 속성들이 없으면 추가
+    if torch.cuda.is_available():
+        torch.cuda.synchronize()
+        print(f"💾 GPU Memory before evaluation: {torch.cuda.memory_allocated() / 1024**3:.2f} GB")
+    
+    # 마지막 아이템 prepend 옵션 처리
+    if args.prepend_last_item and pre_generated_texts is not None:
+        if item_metadata is None:
+            print("⚠️  Warning: prepend_last_item is enabled but item_metadata is not provided. Skipping prepending.")
+        else:
+            print("📝 Prepending last purchased item to generated texts...")
+            last_item_texts = get_last_item_text(
+                dataset, 
+                item_metadata,
+                use_brand=args.use_brand,
+                use_category=args.use_category
+            )
+            
+            # 마지막 아이템 텍스트를 generated text 앞에 추가
+            modified_texts = []
+            for last_item_text, generated_text in zip(last_item_texts, pre_generated_texts):
+                if last_item_text:
+                    modified_text = f"{last_item_text}\n\n{generated_text}"
+                else:
+                    modified_text = generated_text
+                modified_texts.append(modified_text)
+            
+            pre_generated_texts = modified_texts
+            print(f"✓ Prepended last item to {len(pre_generated_texts)} texts")
+            
+            # 샘플 출력
+            print("\n" + "="*80)
+            print("📝 Sample Modified Text (with last item prepended):")
+            print("="*80)
+            if len(pre_generated_texts) > 0:
+                print(pre_generated_texts[0][:500] + "..." if len(pre_generated_texts[0]) > 500 else pre_generated_texts[0])
+                print("="*80)
     
     # Evaluator 인스턴스 생성 및 평가 실행
     evaluator = RecommendationEvaluator(args, args.final_checkpoint_dir)
     
     try:
-        results = evaluator.evaluate(eval_data, split=split, save_log=True)
+        results = evaluator.evaluate(dataset, split=split, save_log=True, pre_generated_texts=pre_generated_texts)
     finally:
         # 평가 완료 후 메모리 정리
         evaluator.cleanup()
@@ -452,326 +314,314 @@ def evaluate_model(args, eval_data, split="test"):
         gc.collect()
         
         if torch.cuda.is_available():
-            print(f"\n💾 GPU Memory after evaluation: {torch.cuda.memory_allocated() / 1024**3:.2f} GB")
+            print(f"💾 GPU Memory after evaluation: {torch.cuda.memory_allocated() / 1024**3:.2f} GB")
     
     return results
 
 
 
 def parse_arguments():
-    """
-    Parse command-line arguments for inference and training settings.
-    Returns:
-        argparse.Namespace: Parsed arguments.
-    """
-    parser = argparse.ArgumentParser(description="Run inference and generate test results.")
-
-    # fix seed
-    parser.add_argument("--seed", type=int, default=22)
-
-    # General settings
+    """Command line arguments"""
+    parser = argparse.ArgumentParser(
+        description="SFT Training for Recommendation System"
+    )
+    
+    # Basic settings
     parser.add_argument("--run_name", type=str, default="sft")
-    parser.add_argument("--data_name", type=str, default="toys")
-    parser.add_argument("--device", type=str, default="cuda:0")
+    parser.add_argument("--data_name", type=str, default="beauty")
+    parser.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu")
+    parser.add_argument("--seed", type=int, default=42)
+    
+    # Model settings
     parser.add_argument("--model_name", type=str, default="google/gemma-3-1b-it")
-    parser.add_argument("--target_model_name", type=str, default="gemma-3-12b-it")
-    # parser.add_argument("--pretrained_run_name", type=str, default=None)
+    parser.add_argument("--quantization_option", type=str, default="None",
+                        choices=["None", "4bit", "8bit"])
+    parser.add_argument("--rank_dim", type=int, default=8,
+                        help="LoRA rank dimension")
 
     # Training settings
-    parser.add_argument("--train_batch_size", type=int, default=4)
-    parser.add_argument("--eval_batch_size", type=int, default=8)
+    parser.add_argument("--batch_size", type=int, default=4,
+                        help="Training batch size per device")
+    parser.add_argument("--eval_batch_size", type=int, default=16,
+                        help="Evaluation batch size")
     parser.add_argument("--learning_rate", type=float, default=1e-6)
-    parser.add_argument("--epochs", type=int, default=1)
+    parser.add_argument("--num_epochs", type=int, default=1)
     parser.add_argument("--gradient_accumulation_steps", type=int, default=1)
-    parser.add_argument("--max_input_tokens", type=int, default=1024+512)
-    parser.add_argument("--max_new_tokens", type=int, default=1024)
-    parser.add_argument("--max_length", type=int, default=1024*4)
-    
-    parser.add_argument("--num_train_samples", type=int, default=50000)
-    parser.add_argument("--num_test_samples", type=int, default=50000)
     parser.add_argument("--max_steps", type=int, default=5000)
-
-    parser.add_argument("--use_vllm", action="store_true")
-    parser.add_argument("--max_output_tokens", type=int, default=1024)
-    parser.add_argument("--gpu_memory_utilization", type=float, default=0.95)
+    parser.add_argument("--max_grad_norm", type=float, default=1.0)
+    parser.add_argument("--bf16", action="store_true", help="Use bfloat16")
+    
+    # Token settings
+    parser.add_argument("--max_length", type=int, default=1024*2,
+                        help="Maximum sequence length for SFT")
+    parser.add_argument("--max_new_tokens", type=int, default=512,
+                        help="Maximum new tokens for generation")
+    parser.add_argument("--eval_max_tokens", type=int, default=512,
+                        help="Maximum new tokens for generation")
 
     # Target settings
-    parser.add_argument("--target", type=str, default="user_preference_reasoning")
-    parser.add_argument("--add_item_meta", action="store_true")
-    parser.add_argument("--add_target_item_meta", action="store_true")
-
-    # User history settings
-    parser.add_argument("--max_history_len", type=int, default=8)
-    parser.add_argument("--days", type=int, default=60)
-    parser.add_argument("--revearse", action="store_true")
-
-    # Filtered user settings
-    parser.add_argument("--use_filtered_users", action="store_true", 
-                        help="Use only filtered top users from embedding comparison")
-    parser.add_argument("--filtered_user_file", type=str, default=None,
-                        help="Path to filtered user JSON file (e.g., top25_target_vs_vanilla_beauty_train.json)")
-
-    # Item meta settings
-    parser.add_argument("--item_meta_list_text", type=str, default="title_brand_category")
-
-    # Quantization settings
-    parser.add_argument("--quantization_option", type=str, default="None")
-    parser.add_argument("--rank_dim", type=int, default=8)
+    parser.add_argument("--target_type", type=str, default="from_file",
+                        choices=["from_file", "item_metadata"],
+                        help="Target text generation method: from_file (기존 파일에서 로드) 또는 item_metadata (아이템 메타데이터 사용)")
+    parser.add_argument("--target", type=str, default="user_preference_reasoning",
+                        help="Target type name (when using from_file)")
+    parser.add_argument("--target_model_name", type=str, default="gemma-3-12b-it",
+                        help="Target model name (when using from_file)")
+    parser.add_argument("--use_brand", action="store_true", default=True,
+                        help="Include brand in target/prompt (when using item_metadata)")
+    parser.add_argument("--use_category", action="store_true", default=True,
+                        help="Include category in target/prompt (when using item_metadata)")
+    
+    # Prompt Generation settings
+    parser.add_argument("--prompt_type", type=str, default="seq_rec",
+                        help="Prompt template type")
+    parser.add_argument("--use_description", action="store_true",
+                        help="Include description in prompt")
+    parser.add_argument("--use_features", action="store_true",
+                        help="Include features in prompt")
+    parser.add_argument("--use_date", action="store_true", default=True,
+                        help="Include purchase date information in prompt")
+    parser.add_argument("--use_last_item", action="store_true", default=True,
+                        help="Emphasize last item in prompt")
+    parser.add_argument("--emphasize_recent_item", action="store_true",
+                        help="Emphasize recent purchase item with detailed information including purchase date ('This user's most recent purchase is...' format)")
+    parser.add_argument("--include_target_date", action="store_true",
+                        help="Include target/label item's purchase date at the end of prompt")
+    parser.add_argument("--max_history_len", type=int, default=8,
+                        help="Max history length")
+    parser.add_argument("--history_text_max_length", type=int, default=128,
+                        help="Max words per history item")
+    parser.add_argument("--days_filter", type=int, default=None,
+                        help="Filter reviews to only include those within N days of target date")
+    
+    # SASRec Integration
+    parser.add_argument("--use_sasrec", action="store_true",
+                        help="Include SASRec recommendations in prompt as reference for query generation")
+    parser.add_argument("--sasrec_top_k", type=int, default=5,
+                        help="Number of top-K SASRec recommendations to include in prompt")
+    
+    # Checkpoint settings
+    parser.add_argument("--checkpoint_dir", type=str, default="checkpoints/sft",
+                        help="Checkpoint directory")
+    parser.add_argument("--final_checkpoint_dir", type=str, default="checkpoints/sft/checkpoint-5000",
+                        help="Final checkpoint directory for evaluation")
+    parser.add_argument("--logging_steps", type=int, default=1000)
+    parser.add_argument("--save_steps", type=int, default=500)
+    parser.add_argument("--eval_steps", type=int, default=5000)
+    parser.add_argument("--save_total_limit", type=int, default=3)
+    parser.add_argument("--report_to", type=str, default="wandb",
+                        help="Logging backend (wandb, tensorboard, none)")
 
     # Evaluation settings
     parser.add_argument("--run_evaluation", action="store_true",
-                        help="Run evaluation after training using RecommendationEvaluator")
-    parser.add_argument("--save_responses", action="store_true",
-                        help="Save generated responses to JSON files")
-    parser.add_argument("--emb_model_name", type=str, default="mixedbread-ai/mxbai-embed-large-v1",
+                        help="Run evaluation after training")
+    parser.add_argument("--eval_on_train", action="store_true",
+                        help="Run evaluation on train set")
+    parser.add_argument("--eval_on_test", action="store_true", default=True,
+                        help="Run evaluation on test set")
+    parser.add_argument("--emb_model_name", type=str, 
+                        default="mixedbread-ai/mxbai-embed-large-v1",
                         help="Embedding model name for evaluation")
-    parser.add_argument("--emb_type", type=str, default="review_description",
+    parser.add_argument("--emb_type", type=str, default="item_meta_only",
                         help="Embedding type (title, description, etc.)")
-    parser.add_argument("--eval_emb_max_length", type=int, default=512,
-                        help="Max length for embedding computation")
-    parser.add_argument("--eval_emb_batch_size", type=int, default=512,
-                        help="Batch size for embedding computation")
-    parser.add_argument("--eval_samples", type=int, default=100000,
-                        help="Maximum number of samples to evaluate")
+    parser.add_argument("--eval_emb_max_length", type=int, default=512)
+    parser.add_argument("--eval_emb_batch_size", type=int, default=512)
+    parser.add_argument("--eval_samples", type=int, default=100000)
+    parser.add_argument("--gpu_memory_utilization", type=float, default=0.95)
+    parser.add_argument("--eval_emb_gpu_memory_utilization", type=float, default=0.95)
+    parser.add_argument("--zeroshot_evaluation", action="store_true", help="Run zeroshot evaluation")
 
-    parser.add_argument("--checkpoint_dir", type=str, default=f"checkpoints/sft_beauty", help="Checkpoint directory")
-    parser.add_argument("--final_checkpoint_dir", type=str, default=f"checkpoints/sft_beauty/checkpoint-5000", help="Final checkpoint directory")
-    parser.add_argument("--logging_steps", type=int, default=100, help="Logging steps")
-    parser.add_argument("--save_steps", type=int, default=500, help="Save steps")
-    parser.add_argument("--eval_steps", type=int, default=5000, help="Eval steps")
+    parser.add_argument("--use_sentence_transformers", action="store_true", help="Use sentence transformers for evaluation")
+    
+    # Pre-generated CSV for evaluation
+    parser.add_argument("--pre_generated_csv", type=str, default=None,
+                        help="Path to CSV file containing pre-generated texts for evaluation")
+    
+    # Prepend last item option
+    parser.add_argument("--prepend_last_item", action="store_true",
+                        help="Prepend last purchased item to generated text during evaluation")
+    
+    # Rank-based filtering for training
+    parser.add_argument("--filter_train_csv", type=str, default=None,
+                        help="Path to evaluation CSV file for filtering train set by rank")
+    parser.add_argument("--filter_valid_csv", type=str, default=None,
+                        help="Path to evaluation CSV file for filtering valid set by rank")
+    parser.add_argument("--filter_test_csv", type=str, default=None,
+                        help="Path to evaluation CSV file for filtering test set by rank")
+    parser.add_argument("--rank_min", type=int, default=None,
+                        help="Minimum rank for filtering (inclusive, None = no limit)")
+    parser.add_argument("--rank_max", type=int, default=None,
+                        help="Maximum rank for filtering (inclusive, None = no limit)")
 
     args = parser.parse_args()
-    args.item_meta_list_text = args.item_meta_list_text.split("_")
-    args.history_limit = args.max_history_len
 
     return args
 
-if __name__ == "__main__":
+def main():
+    """Main training function"""
     args = parse_arguments()
+    
+    # Seed 설정
     random.seed(args.seed)
+    torch.manual_seed(args.seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(args.seed)
+    
+    print("=" * 80)
+    print("🚀 SFT Training for Recommendation System")
+    print("=" * 80)
     print_arguments(args)
+    
+    # 모델 이름 디렉토리 설정
     args.model_name_dir = args.model_name.split("/")[-1]
 
-    # load data
-    (
-        train_user_seq_data, val_user_seq_data, test_user_seq_data, 
-        train_pos_item_ids, val_pos_item_ids, test_pos_item_ids, 
-        train_user_target, val_user_target, test_user_target
-    ) = get_uid_to_seq_data(args)
-
-    item_meta = get_item_meta(args)
-
-    # get prompt
-    train_uid_to_prompt = get_time_aware_user_history_text(args, split="train", item_meta=item_meta, prefix="")
-    val_uid_to_prompt = get_time_aware_user_history_text(args, split="valid", item_meta=item_meta, prefix="")
-    test_uid_to_prompt = get_time_aware_user_history_text(args, split="test", item_meta=item_meta, prefix="")
-
-    train_uid_to_prompt = get_formatted_prompt_list(args, train_uid_to_prompt)
-    val_uid_to_prompt = get_formatted_prompt_list(args, val_uid_to_prompt)
-    test_uid_to_prompt = get_formatted_prompt_list(args, test_uid_to_prompt)
-    
-    # load target text
-    train_user_preference_file = f"data_processed/{args.data_name}_{args.target_model_name}_train_{args.target}.json"
-    valid_user_preference_file = f"data_processed/{args.data_name}_{args.target_model_name}_valid_{args.target}.json"
-    test_user_preference_file = f"data_processed/{args.data_name}_{args.target_model_name}_test_{args.target}.json"
-    with open(train_user_preference_file, 'r') as f:
-        train_user_preference = json.load(f)
-    train_user_preference = {int(k): v for k, v in train_user_preference.items()}
-    with open(valid_user_preference_file, 'r') as f:
-        val_user_preference = json.load(f)
-    val_user_preference = {int(k): v for k, v in val_user_preference.items()}
-    with open(test_user_preference_file, 'r') as f:
-        test_user_preference = json.load(f)
-    test_user_preference = {int(k): v for k, v in test_user_preference.items()}
-
-    train_target_text = get_user_text(
-            args, train_user_seq_data, train_user_preference, item_meta, 
-            user_to_target_item=train_user_target, 
-            add_item_meta=args.add_item_meta, 
-            add_target_item_meta=args.add_target_item_meta
-        )
-    train_target_text = train_target_text
-    val_target_text = get_user_text(
-            args, val_user_seq_data, val_user_preference, item_meta, 
-            user_to_target_item=val_user_target, 
-            add_item_meta=args.add_item_meta, 
-            add_target_item_meta=args.add_target_item_meta
-        )
-    val_target_text = val_target_text
-    # test_target_text = get_user_text(
-    #         args, test_user_seq_data, test_user_preference, item_meta, 
-    #         user_to_target_item=test_user_target, 
-    #         add_item_meta=args.add_item_meta, 
-    #         add_target_item_meta=args.add_target_item_meta
-    #     )
-    # test_target_text = test_target_text[1:]
-
-    # print("="*30)
-    # for i in [0, 10, 20, 30]:
-    #     print(train_uid_to_prompt[i])
-    #     print("="*30)
-    #     print(train_target_text[i])
-    #     print("="*50)
-
-    train_prompt_list = [train_uid_to_prompt[i] for i in range(len(train_uid_to_prompt))]
-    val_prompt_list = [val_uid_to_prompt[i] for i in range(len(val_uid_to_prompt))]
-    test_prompt_list = [test_uid_to_prompt[i] for i in range(len(test_uid_to_prompt))]
-
-    assert len(train_prompt_list) == len(train_target_text), f"Train prompt list length {len(train_prompt_list)} != train target text length {len(train_target_text)}"
-    assert len(val_prompt_list) == len(val_target_text), f"Valid prompt list length {len(val_prompt_list)} != valid target text length {len(val_target_text)}"
-
-    # Apply user filtering if enabled
-    if args.use_filtered_users and args.filtered_user_file:
-        print("="*50)
-        print("Applying user filtering...")
-        
-        # Determine file path pattern
-        if args.filtered_user_file:
-            # Load train filtered users
-            train_filter_file = args.filtered_user_file.replace("_train.json", "_train.json")
-            val_filter_file = args.filtered_user_file.replace("_train.json", "_valid.json")
-            test_filter_file = args.filtered_user_file.replace("_train.json", "_test.json")
-        else:
-            train_filter_file = None
-            val_filter_file = None
-            test_filter_file = None
-        
-        # Load filtered user IDs
-        train_filtered_users = load_filtered_users(train_filter_file)
-        val_filtered_users = load_filtered_users(val_filter_file)
-        test_filtered_users = load_filtered_users(test_filter_file)
-        
-        # Filter train data
-        if train_filtered_users:
-            original_train_size = len(train_prompt_list)
-            filtered_train_prompts = []
-            filtered_train_targets = []
-            for i in range(len(train_prompt_list)):
-                user_id = i + 1  # 1-indexed
-                if user_id in train_filtered_users:
-                    filtered_train_prompts.append(train_prompt_list[i])
-                    filtered_train_targets.append(train_target_text[i])
-            train_prompt_list = filtered_train_prompts
-            train_target_text = filtered_train_targets
-            print(f"Train: Filtered {original_train_size} → {len(train_prompt_list)} users")
-        
-        # Filter validation data
-        if val_filtered_users:
-            original_val_size = len(val_prompt_list)
-            filtered_val_prompts = []
-            filtered_val_targets = []
-            for i in range(len(val_prompt_list)):
-                user_id = i + 1  # 1-indexed
-                if user_id in val_filtered_users:
-                    filtered_val_prompts.append(val_prompt_list[i])
-                    filtered_val_targets.append(val_target_text[i])
-            val_prompt_list = filtered_val_prompts
-            val_target_text = filtered_val_targets
-            print(f"Valid: Filtered {original_val_size} → {len(val_prompt_list)} users")
-         
-        print("="*50)
-
-    train_prompt_list = train_prompt_list[:args.num_train_samples]
-    train_target_text = train_target_text[:args.num_train_samples]
-
-    val_prompt_list = val_prompt_list[:args.num_test_samples]
-    val_target_text = val_target_text[:args.num_test_samples]
-
-    test_prompt_list = test_prompt_list[:args.num_test_samples]
-
-    train_dataset = get_dataset(
-        train_prompt_list,
-        train_target_text,
-    )
-
-    val_dataset = get_dataset(
-        val_prompt_list,
-        val_target_text,
-    )
-
-    # test_dataset = get_dataset(
-    #     test_prompt_list,
-    #     test_target_text,
-    # )
-
-    """ Prepare the model """
-    quantization_config = get_quantization_config(args)
-    lora_config = LoraConfig(
-        lora_alpha=16,
-        lora_dropout=0.5,
-        r=args.rank_dim,
-        # target_modules="all-linear",
-        target_modules=["q_proj", "v_proj", "k_proj"],
-        task_type="CAUSAL_LM",
-    )
+    # 토크나이저 로드
+    print(f"\n📚 Loading tokenizer: {args.model_name}")
     tokenizer = initialize_tokenizer(args.model_name)
     
-    model = AutoModelForCausalLM.from_pretrained(
-        args.model_name, 
-        dtype=torch.bfloat16, 
+    # 데이터로더 생성 (create_dataloaders 함수 사용)
+    print(f"\n📊 Creating datasets...")
+    (
+        train_dataset,
+        valid_dataset,
+        test_dataset,
+        prompt_generator,
+        item_metadata,
+    ) = create_dataloaders(args, tokenizer=tokenizer, apply_chat_template=True)
+    
+    # 타겟 텍스트 생성
+    print(f"\n📝 Generating target text (target_type={args.target_type})...")
+    
+    if args.target_type == "item_metadata":
+        # 옵션 1: 아이템 메타데이터만 사용
+        print("  Using item metadata for target text")
+        train_target_dict = generate_target_text_from_metadata(
+            train_dataset.target_dict, 
+            item_metadata,
+            use_brand=args.use_brand,
+            use_category=args.use_category,
         )
+        valid_target_dict = generate_target_text_from_metadata(
+            valid_dataset.target_dict,
+            item_metadata,
+            use_brand=args.use_brand,
+            use_category=args.use_category,
+        )
+        
+        # 리스트를 딕셔너리로 변환
+        train_target_text_dict = {user_id: train_target_dict[i] 
+                                  for i, user_id in enumerate(sorted(train_dataset.target_dict.keys()))}
+        valid_target_text_dict = {user_id: valid_target_dict[i] 
+                                  for i, user_id in enumerate(sorted(valid_dataset.target_dict.keys()))}
+        
+    elif args.target_type == "from_file":
+        # 옵션 2: 파일에서 로드
+        print(f"  Loading target text from file (target={args.target})")
+        train_target_text_dict = load_target_text_from_file(args, split="train")
+        valid_target_text_dict = load_target_text_from_file(args, split="valid")
+    else:
+        raise ValueError(f"Unknown target_type: {args.target_type}")
+    
+    # SFT 데이터셋 준비
+    print(f"\n📦 Preparing SFT datasets...")
+    if args.num_epochs > 0:
+        train_sft_dataset = prepare_sft_dataset(train_dataset, train_target_text_dict)
+        valid_sft_dataset = prepare_sft_dataset(valid_dataset, valid_target_text_dict)
+        
+        print(f"  Train samples: {len(train_sft_dataset)}")
+        print(f"  Valid samples: {len(valid_sft_dataset)}")
 
-    # fine-tune only Gemma3TextModel
+    # 모델 로드
+    print(f"\n🤖 Loading model: {args.model_name}")
+    quantization_config = get_quantization_config(args)
+    
+
+
+    # Gemma3 특별 처리
     if "gemma-3-1b" in args.model_name:
+        print("  Using Gemma3ForCausalLM for gemma-3-1b")
         model = Gemma3ForCausalLM.from_pretrained(
             args.model_name,
-            dtype=torch.bfloat16, 
+            dtype=torch.bfloat16,
             )
-    elif "gemma-3" in args.model_name:
+    elif "gemma-3" in args.model_name and hasattr(model, 'model'):
+        print("  Using Gemma3 text model only")
+        model = AutoModelForCausalLM.from_pretrained(
+        args.model_name, 
+        quantization_config=quantization_config,
+        dtype=torch.bfloat16,
+        trust_remote_code=True,
+        )
         model = model.model
+    else:
+        model = AutoModelForCausalLM.from_pretrained(
+        args.model_name, 
+        quantization_config=quantization_config,
+        dtype=torch.bfloat16,
+        trust_remote_code=True,
+        )
 
+    # 학습 시작
+    if args.num_epochs > 0:
+        print(f"\n{'='*80}")
+        print("🚀 Starting SFT Training")
+        print(f"{'='*80}")
 
-    torch_dtype = model.dtype
-
-    if args.epochs > 0:
+        # SFT 설정
         training_args = SFTConfig(
             run_name=f"{args.run_name}_{args.data_name}",
+            output_dir=args.checkpoint_dir,
             max_steps=args.max_steps,
-            output_dir=args.checkpoint_dir,                     # directory to save and repository id
-            max_length=args.max_input_tokens,                   # max sequence length for model and packing of the dataset
-            packing=True,                                       # Groups multiple samples in the dataset into a single sequence
-            num_train_epochs=args.epochs,                       # number of training epochs
-            per_device_train_batch_size=args.train_batch_size,  # batch size per device during training
-            gradient_checkpointing=False,                       # Caching is incompatible with gradient checkpointing
-            max_grad_norm=1.0,
-            optim="adamw_torch_fused",                          # use fused adamw optimizer
-            logging_steps=args.logging_steps,                                  # log every step
-            save_strategy="steps",                              # save checkpoint every epoch
+            max_length=args.max_length,
+            packing=False,
+            num_train_epochs=args.num_epochs,
+            per_device_train_batch_size=args.batch_size,
+            gradient_accumulation_steps=args.gradient_accumulation_steps,
+            gradient_checkpointing=False,
+            max_grad_norm=args.max_grad_norm,
+            optim="adamw_torch_fused",
+            logging_steps=args.logging_steps,
+            save_strategy="steps",
             save_steps=args.save_steps,
-            eval_strategy="steps",                              # evaluate checkpoint every epoch
+            eval_strategy="steps",
             eval_steps=args.eval_steps,
-            learning_rate=args.learning_rate,                   # learning rate
-            bf16=True,                                          # use bfloat16 precision
-            lr_scheduler_type="constant",                       # use constant learning rate scheduler
-            # push_to_hub=True,                                 # push model to hub
-            report_to="wandb",                                  # report metrics to tensorboard
+            save_total_limit=args.save_total_limit,
+            learning_rate=args.learning_rate,
+            bf16=True,
+            lr_scheduler_type="cosine",
+            report_to=args.report_to if args.report_to != "none" else None,
             dataset_kwargs={
-                "add_special_tokens": False, # Template with special tokens
-                "append_concat_token": True, # Add EOS token as separator token between examples
+                "add_special_tokens": False,
+                "append_concat_token": True,
             }
         )
-        # 4. Initialize the SFTTrainer
+        
+        # SFT Trainer 초기화
         trainer = SFTTrainer(
             model=model,
             args=training_args,
-            train_dataset=train_dataset,
-            eval_dataset=val_dataset,
-            # peft_config=lora_config, # Pass the LoRA configuration
+            train_dataset=train_sft_dataset,
+            eval_dataset=valid_sft_dataset,
             processing_class=tokenizer,
-            # packing=True,
-            # max_seq_length=512, # Maximum sequence length for training
-            # Add other training arguments as needed, e.g., learning_rate, num_train_epochs
         )
+        
+        # 학습 실행
         trainer.train()
-        os.makedirs(f"models/{args.run_name}_{args.data_name}_{args.model_name_dir}", exist_ok=True)
-        model.save_pretrained(f"models/{args.run_name}_{args.data_name}_{args.model_name_dir}")
+        
+        # 모델 저장
+        output_model_dir = f"models/{args.run_name}_{args.data_name}_{args.model_name_dir}"
+        print(f"\n💾 Saving model to: {output_model_dir}")
+        os.makedirs(output_model_dir, exist_ok=True)
+        model.save_pretrained(output_model_dir)
+        tokenizer.save_pretrained(output_model_dir)
+        
+        print("=" * 80)
+        print("✓ Training completed!")
+        print("=" * 80)
         
         # 학습 완료 후 메모리 정리
-        print("\n" + "="*80)
-        print("🧹 Cleaning up training resources...")
-        print("="*80)
+        print("\n🧹 Cleaning up training resources...")
         
-        # Trainer와 model 정리
         if hasattr(trainer, 'model'):
             trainer.model = None
         if hasattr(trainer, 'optimizer'):
@@ -784,77 +634,78 @@ if __name__ == "__main__":
         del model
         del trainer
         
-        # GPU 메모리 강제 해제
         torch.cuda.empty_cache()
         gc.collect()
 
         if torch.cuda.is_available():
             torch.cuda.synchronize()
             print(f"💾 GPU Memory after training: {torch.cuda.memory_allocated() / 1024**3:.2f} GB")
-            print(f"💾 GPU Memory reserved: {torch.cuda.memory_reserved() / 1024**3:.2f} GB")
-
-    # # 
-
-    # Optional: generate and save the results
-    if args.save_responses:
+    
+    # 평가
+    if args.run_evaluation:
         print("\n" + "="*80)
-        print("📝 Generating and saving responses...")
+        print("🎯 Starting Model Evaluation")
         print("="*80)
         
-        response_dict = generate_responses_with_vllm(args, train_prompt_list)
-        with open(f"data_processed/{args.run_name}_{args.data_name}_{args.model_name_dir}_train_results.json", "w") as f:
-            json.dump(response_dict, f)
-
-        response_dict = generate_responses_with_vllm(args, val_prompt_list)
-        with open(f"data_processed/{args.run_name}_{args.data_name}_{args.model_name_dir}_valid_results.json", "w") as f:
-            json.dump(response_dict, f)
-
-        response_dict = generate_responses_with_vllm(args, test_prompt_list)
-        with open(f"data_processed/{args.run_name}_{args.data_name}_{args.model_name_dir}_test_results.json", "w") as f:
-            json.dump(response_dict, f)
-
-        print("-"*50)
-        for i in [10, 20, 30]:
-            if i in response_dict:
-                print(response_dict[i])
-                print("-"*50)
-
-    # Evaluation with RecommendationEvaluator
-    print("\n" + "="*80)
-    print("🎯 Starting Model Evaluation")
-    print("="*80)
+        # Pre-generated CSV가 제공된 경우
+        pre_generated_texts = None
+        if args.pre_generated_csv is not None:
+            print(f"\n📄 Loading pre-generated texts from: {args.pre_generated_csv}")
+            try:
+                df = pd.read_csv(args.pre_generated_csv)
+                if 'generated_text' not in df.columns:
+                    raise ValueError(f"CSV file must contain 'generated_text' column. Found columns: {df.columns.tolist()}")
+                pre_generated_texts = df['generated_text'].tolist()
+                print(f"✓ Loaded {len(pre_generated_texts)} pre-generated texts from CSV")
+            except Exception as e:
+                print(f"❌ Error loading CSV file: {e}")
+                raise
+        
+        # Train set 평가
+        if args.eval_on_train:
+            print("\n" + "="*80)
+            print("📊 Evaluating on TRAIN Set")
+            print("="*80)
+            train_results = evaluate_final_metrics(
+                args, 
+                train_dataset, 
+                split="train", 
+                pre_generated_texts=None,
+                item_metadata=item_metadata
+            )
+            
+            print("\n" + "="*80)
+            print("✅ Train Evaluation Complete!")
+            print("="*80)
+            print("\nTrain Results:")
+            for metric_name, value in train_results.items():
+                print(f"  {metric_name.upper()}: {value:.4f}")
+            print("="*80)
+        
+        # Test set 평가
+        if args.eval_on_test:
+            print("\n" + "="*80)
+            print("📊 Evaluating on TEST Set")
+            print("="*80)
+            test_results = evaluate_final_metrics(
+                args, 
+                test_dataset, 
+                split="test", 
+                pre_generated_texts=pre_generated_texts,
+                item_metadata=item_metadata
+            )
+        
+            print("\n" + "="*80)
+            print("✅ Test Evaluation Complete!")
+            print("="*80)
+            print("\nTest Results:")
+            for metric_name, value in test_results.items():
+                print(f"  {metric_name.upper()}: {value:.4f}")
+            print("="*80)
     
-    # Prepare evaluation datasets
-    # Get the original user_seq_data and user_target for evaluation
-    # We need to map prompt_list back to user_seq_data
-    
-    # For test evaluation - use full test data if available
-    test_eval_data = prepare_eval_dataset(
-        test_prompt_list,
-        test_user_seq_data,
-        test_user_target
-    )
-    
-    print(f"Prepared {len(test_eval_data)} test samples for evaluation")
-    
-    # Run evaluation
-    test_results = evaluate_model(args, test_eval_data, split="test")
-    
-    print("\n" + "="*80)
-    print("✅ Evaluation Complete!")
-    print("="*80)
-    print("\nTest Results:")
-    for metric_name, value in test_results.items():
-        print(f"  {metric_name.upper()}: {value:.4f}")
-    print("="*80)
+    print("\n✓ Done!")
 
-    # from transformers import pipeline
-    # # Load the model and tokenizer into the pipeline
-    # pipe = pipeline("text-generation", model=model, tokenizer=tokenizer)
-    # response_list = pipe(
-    #     test_prompt_list, max_new_tokens=1024, disable_compile=True, 
-    #     device=args.device, torch_dtype=torch.bfloat16, do_sample=False, num_return_sequences=1
-    #     )
-    # with open(f"data_processed/{args.run_name}_{args.data_name}_{args.model_name_dir}_test_results.json", "w") as f:
-    #     json.dump(response_list, f)
+
+if __name__ == "__main__":
+    main()
     

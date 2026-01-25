@@ -19,31 +19,36 @@
 
 # # Python 경로 설정
 # export PYTHONPATH="${PYTHONPATH}:$(pwd)/src"
-
+max_steps=5000
+dataset_name="sports"
 # 학습 실행
 CUDA_VISIBLE_DEVICES=3 python3 src/grpo_train.py \
-    --policy_model "google/gemma-3-1b-it" \
-    --data_name "beauty" \
-    --sequential_file "data/beauty/sequential_data.txt" \
+    --run_name "r1_rec_${dataset_name}_pref" \
+    --model_name "google/gemma-3-1b-it" \
+    --data_name $dataset_name \
+    --sequential_file "data/$dataset_name/sequential_data.txt" \
     --reward_type "ndcg" \
-    --k 1000 \
-    --batch_size 32 \
+    --k 100 \
+    --prompt_type "feature_reasoning_rec" \
+    --use_local_embedding \
+    --emb_model_name "mixedbread-ai/mxbai-embed-large-v1" \
+    --emb_type item_preference_1024_gemma-3-4b-it \
+    --max_new_tokens 128 \
+    --batch_size 48 \
     --num_sample_generations 4 \
     --gradient_accumulation_steps 1 \
     --learning_rate 1e-6 \
-    --num_epochs 1 \
-    --max_steps 3000 \
-    --max_length 512 \
+    --num_epochs 0 \
+    --max_steps $max_steps \
     --use_brand \
     --use_category \
-    --checkpoint_dir "checkpoints/grpo" \
-    --log_interval 10 \
-    --eval_interval 100 \
+    --checkpoint_dir "checkpoints/r1_rec_${dataset_name}_pref" \
+    --final_checkpoint_dir "checkpoints/r1_rec_${dataset_name}_pref/checkpoint-$max_steps" \
+    --log_interval 100 \
+    --eval_interval 5000 \
     --save_interval 500 \
-    --max_history_len 1 \
-    --num_negs 0 \
+    --num_negs 99 \
     --device "cuda" \
-    # --normalize_rewards \
     "$@"
 
 echo "✅ Training completed!"

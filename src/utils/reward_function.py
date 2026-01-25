@@ -9,6 +9,7 @@ import numpy as np
 from typing import List, Dict, Optional, Tuple
 import ray
 from pathlib import Path
+import argparse
 
 
 def calculate_dcg(relevance_scores: torch.Tensor, k: Optional[int] = None) -> torch.Tensor:
@@ -555,6 +556,337 @@ def load_negative_pool(data_name: str, data_dir: str = "data", k: int = 10) -> D
     return negative_pool
 
 
+class SimilarHistoryItemMentionReward:
+    """
+    유저 구매기록 중 타겟과 가장 유사도가 높은 아이템의 title을 언급할 경우 보상
+    임베딩 유사도 기반으로 가장 유사한 아이템을 캐싱하고, title의 첫 3단어를 언급하면 reward 1점 부여
+    """
+    
+    def __init__(
+        self,
+        data_name: str,
+        item_embeddings: torch.Tensor,
+        uid_2_target: Dict[int, int],
+        device: str = "cuda",
+        data_dir: str = "data",
+        use_position_weight: bool = False,
+        position_decay: float = 0.5,
+    ):
+        """
+        Args:
+            data_name: 데이터셋 이름
+            item_embeddings: 사전 계산된 아이템 임베딩 [num_items+1, emb_dim]
+            uid_2_target: 사용자 ID to 타겟 아이템 ID 매핑
+            device: 디바이스
+            data_dir: 데이터 디렉토리
+            use_position_weight: 위치 기반 가중치 사용 여부
+                                True이면 텍스트 앞쪽에 언급될수록 더 높은 보상
+            position_decay: 위치 기반 감소율 (0.0 ~ 1.0)
+                          0.0 = 위치 무관하게 동일 보상
+                          1.0 = 텍스트 끝에서는 보상 0
+                          예: 0.5이면 텍스트 끝에서 보상이 절반으로 감소
+        """
+        self.__name__ = "SimilarHistoryItemMentionReward"
+        self.data_name = data_name
+        self.item_embeddings = item_embeddings
+        self.device = device
+        self.use_position_weight = use_position_weight
+        self.position_decay = position_decay
+        
+        # 아이템 메타데이터 로드 (title, brand, category)
+        with open(f"{data_dir}/{data_name}/meta_text_fix.json", "r") as f:
+            self.item_metadata = json.load(f)
+        
+        print(f"✓ SimilarHistoryItemMentionReward initialization started")
+        print(f"  - Loaded metadata for {len(self.item_metadata)} items")
+        if self.use_position_weight:
+            print(f"  - Position-based weighting: ENABLED (decay={self.position_decay})")
+            print(f"    → Earlier mentions get higher rewards")
+        else:
+            print(f"  - Position-based weighting: DISABLED")
+        
+        # 캐시: user_id -> most_similar_history_item_id
+        self.similarity_cache = {}
+        
+        # 전체 데이터에 대해 미리 유사한 아이템 계산
+        print(f"  - Pre-computing most similar history items for all users...")
+        self._precompute_similar_items(uid_2_target, data_name, data_dir)
+        print(f"✓ Pre-computed similar items for {len(self.similarity_cache)} user-target pairs")
+    
+    def _precompute_similar_items(
+        self,
+        uid_2_target: Dict[int, int],
+        data_name: str,
+        data_dir: str
+    ):
+        """
+        전체 데이터에 대해 타겟과 가장 유사한 히스토리 아이템을 미리 계산
+        
+        Args:
+            uid_2_target: 사용자 ID to 타겟 아이템 ID 매핑
+            data_name: 데이터셋 이름
+            data_dir: 데이터 디렉토리
+        """
+        # sequential_data.txt에서 히스토리 정보 로드
+        sequential_file = f"{data_dir}/{data_name}/sequential_data.txt"
+        
+        # 정규화된 임베딩 미리 계산 (전체 아이템)
+        normalized_embeddings = torch.nn.functional.normalize(self.item_embeddings, p=2, dim=1)
+        
+        with open(sequential_file, 'r') as f:
+            for line in f:
+                parts = [int(p) for p in line.strip().split()]
+                user_id = parts[0]
+                history = parts[1:-3]  # Train set의 history
+                target_id = parts[-3]   # Train set의 target
+                
+                # uid_2_target에 해당하는 사용자만 처리
+                if user_id not in uid_2_target:
+                    continue
+                
+                # 히스토리가 비어있으면 스킵
+                if len(history) == 0:
+                    continue
+                
+                # 타겟 임베딩 (정규화됨)
+                target_emb = normalized_embeddings[target_id]  # [emb_dim]
+                
+                # 히스토리 임베딩 (정규화됨)
+                history_ids = torch.tensor(history, dtype=torch.long, device=self.device)
+                history_embs = normalized_embeddings[history_ids]  # [history_len, emb_dim]
+                
+                # 코사인 유사도 계산
+                similarities = torch.mm(target_emb.unsqueeze(0), history_embs.T).squeeze(0)  # [history_len]
+                
+                # 가장 유사한 아이템 찾기
+                most_similar_idx = similarities.argmax().item()
+                most_similar_item_id = history[most_similar_idx]
+                
+                # 캐시에 저장
+                self.similarity_cache[user_id] = most_similar_item_id
+    
+    def _get_most_similar_history_item(
+        self,
+        user_id: int,
+    ) -> int:
+        """
+        히스토리 중 타겟과 가장 유사한 아이템 찾기 (캐시에서 가져오거나 실시간 계산)
+        
+        Args:
+            user_id: 사용자 ID
+            target_id: 타겟 아이템 ID
+            history_ids: 히스토리 아이템 ID 리스트
+            
+        Returns:
+            most_similar_item_id: 가장 유사한 히스토리 아이템 ID
+        """        
+        return self.similarity_cache[user_id]
+    
+    def _get_first_three_words(self, title: str) -> str:
+        """
+        Title의 첫 3단어 추출
+        
+        Args:
+            title: 아이템 title
+            
+        Returns:
+            first_three_words: 첫 3단어를 공백으로 연결한 문자열 (소문자)
+        """
+        words = title.strip().split()
+        first_three = " ".join(words[:3])
+        return first_three.lower()
+    
+    def _calculate_position_weight(self, position: int, text_length: int) -> float:
+        """
+        위치 기반 가중치 계산
+        
+        Args:
+            position: 언급된 위치 (문자 인덱스)
+            text_length: 전체 텍스트 길이
+            
+        Returns:
+            weight: 위치 기반 가중치 (0.0 ~ 1.0)
+                   앞쪽일수록 1.0에 가깝고, 뒤쪽일수록 감소
+        """
+        if text_length == 0:
+            return 1.0
+        
+        # 상대적 위치 계산 (0.0 = 맨 앞, 1.0 = 맨 뒤)
+        position_ratio = position / text_length
+        
+        # 가중치 계산: 1.0 - (position_ratio * decay)
+        # decay=0.0 → 위치 무관하게 1.0
+        # decay=1.0 → 맨 뒤에서는 0.0
+        # decay=0.5 → 맨 뒤에서는 0.5
+        weight = 1.0 - (position_ratio * self.position_decay)
+        
+        return max(0.0, weight)  # 최소값 0.0 보장
+    
+    def __call__(
+        self,
+        generated_texts: List[str],
+        targets: List[int],
+        histories: List[List[int]],
+        user_ids: List[int],
+        **kwargs
+    ) -> List[float]:
+        """
+        생성된 텍스트에서 유사한 히스토리 아이템의 title 언급 여부를 확인하여 보상
+        
+        Args:
+            generated_texts: [batch_size] 생성된 텍스트
+            targets: [batch_size] 타겟 아이템 ID
+            histories: [batch_size, *] 히스토리 아이템 ID 리스트
+            user_ids: [batch_size] 사용자 ID
+            
+        Returns:
+            rewards: [batch_size] 보상 값
+                    - use_position_weight=False: 0 또는 1.0
+                    - use_position_weight=True: 0 ~ 1.0 (위치에 따라 가중)
+        """
+        rewards = []
+        
+        for gen_text, target_id, history_ids, user_id in zip(generated_texts, targets, histories, user_ids):
+            reward = 0.0
+            
+            # 가장 유사한 히스토리 아이템 찾기
+            most_similar_item_id = self._get_most_similar_history_item(user_id)
+            
+            # 해당 아이템의 title 가져오기
+            if str(most_similar_item_id) in self.item_metadata:
+                item_title = self.item_metadata[str(most_similar_item_id)]["title"]
+                first_three_words = self._get_first_three_words(item_title)
+                
+                # 생성된 텍스트에 첫 3단어가 포함되어 있는지 확인 (대소문자 무시)
+                gen_text_lower = gen_text.lower()
+                if first_three_words in gen_text_lower:
+                    if self.use_position_weight:
+                        # 위치 기반 가중치 적용
+                        position = gen_text_lower.find(first_three_words)
+                        text_length = len(gen_text_lower)
+                        weight = self._calculate_position_weight(position, text_length)
+                        reward = 1.0 * weight
+                    else:
+                        # 위치 무관하게 1.0점
+                        reward = 1.0
+            
+            rewards.append(reward)
+        
+        return rewards
+
+
+class BrandMentionReward:
+    """
+    타겟 아이템의 브랜드를 언급할 경우 보상 (0.5점)
+    """
+    
+    def __init__(
+        self,
+        data_name: str,
+        device: str = "cuda",
+        data_dir: str = "data",
+    ):
+        """
+        Args:
+            data_name: 데이터셋 이름
+            device: 디바이스
+            data_dir: 데이터 디렉토리
+        """
+        self.__name__ = "BrandMentionReward"
+        self.data_name = data_name
+        self.device = device
+        
+        # 아이템 메타데이터 로드
+        with open(f"{data_dir}/{data_name}/meta_text_fix.json", "r") as f:
+            item_metadata = json.load(f)
+            item_metadata = {int(k): v for k, v in item_metadata.items()}
+        self.item_brands = {item_id: str(item_metadata[item_id]["brand"]) for item_id in item_metadata}
+        
+        print(f"✓ BrandMentionReward initialized")
+        print(f"  - Loaded brands for {len(self.item_brands)} items")
+    
+    def __call__(
+        self,
+        generated_texts: List[str],
+        targets: List[int],
+        **kwargs
+    ) -> List[float]:
+        """
+        생성된 텍스트에서 타겟 아이템의 브랜드 언급 여부를 확인하여 보상
+        
+        Args:
+            generated_texts: [batch_size] 생성된 텍스트
+            targets: [batch_size] 타겟 아이템 ID
+            
+        Returns:
+            rewards: [batch_size] 보상 값 (0 또는 0.5)
+        """
+        rewards = []
+        
+        for gen_text, target_id in zip(generated_texts, targets):
+            reward = 0.0
+            if self.item_brands[target_id].lower() in gen_text.lower():
+                reward = 0.5
+            rewards.append(reward)
+        return rewards
+
+
+class CategoryMentionReward:
+    """
+    타겟 아이템의 카테고리를 언급할 경우 보상 (0.5점)
+    """
+    
+    def __init__(
+        self,
+        data_name: str,
+        device: str = "cuda",
+        data_dir: str = "data",
+    ):
+        """
+        Args:
+            data_name: 데이터셋 이름
+            device: 디바이스
+            data_dir: 데이터 디렉토리
+        """
+        self.__name__ = "CategoryMentionReward"
+        self.data_name = data_name
+        self.device = device
+        
+        # 아이템 메타데이터 로드
+        with open(f"{data_dir}/{data_name}/meta_text_fix.json", "r") as f:
+            item_metadata = json.load(f)
+            item_metadata = {int(k): v for k, v in item_metadata.items()}
+        self.item_categories = {item_id: str(item_metadata[item_id]["category"]) for item_id in item_metadata}
+        print(f"✓ CategoryMentionReward initialized")
+        print(f"  - Loaded categories for {len(self.item_categories)} items")
+    
+    def __call__(
+        self,
+        generated_texts: List[str],
+        targets: List[int],
+        **kwargs
+    ) -> List[float]:
+        """
+        생성된 텍스트에서 타겟 아이템의 카테고리 언급 여부를 확인하여 보상
+        
+        Args:
+            generated_texts: [batch_size] 생성된 텍스트
+            targets: [batch_size] 타겟 아이템 ID
+            
+        Returns:
+            rewards: [batch_size] 보상 값 (0 또는 0.5)
+        """
+        rewards = []
+        
+        for gen_text, target_id in zip(generated_texts, targets):
+            reward = 0.0
+            if self.item_categories[target_id].lower() in gen_text.lower():
+                reward = 0.5
+            rewards.append(reward)
+        
+        return rewards
+
+
 class LocalEmbeddingRewardFunction:
     """
     로컬 임베딩 기반 리워드 함수
@@ -563,20 +895,8 @@ class LocalEmbeddingRewardFunction:
     
     def __init__(
         self,
+        args: argparse.Namespace,
         uid_2_target: Dict[int, int],
-        data_name: str,
-        k: int = 10,
-        reward_type: str = "ndcg",
-        emb_model_name: str = "mixedbread-ai/mxbai-embed-large-v1",
-        emb_type: str = "review_description",
-        device: str = "cuda",
-        emb_batch_size: int = 128,
-        data_dir: str = "data",
-        normalize: bool = True,
-        novelty_reward: bool = False,
-        novelty_target_rank: int = 3,
-        novelty_mode: str = "gaussian",
-        popularity_coef: float = 0.0,
     ):
         """
         Args:
@@ -592,71 +912,170 @@ class LocalEmbeddingRewardFunction:
             normalize: 리워드 정규화 여부
             novelty_reward: Novelty 리워드 사용 여부 (True/False)
                            Novelty = NDCG × popularity_weight
+            novelty_coef: Novelty 리워드 계수 (default: 1.0)
             novelty_target_rank: (사용 안함, backward compatibility)
             novelty_mode: (사용 안함, backward compatibility)
+            novelty_annealing: Novelty annealing 사용 여부
+                              True이면 학습 진행도에 따라 novelty 비율을 0→1로 선형 증가
+                              Final reward = (1-ratio)*base + ratio*novelty_coef*novelty
             popularity_coef: Popularity 리워드 계수 (0.0 = 사용 안함)
                             정답인 경우에만 popularity bonus 추가
+            target_emb_reward: 타겟 임베딩 유사도 리워드 사용 여부
+            target_emb_coef: 타겟 임베딩 리워드 계수
+            infonce_reward: InfoNCE (대조 학습) 리워드 사용 여부
+            infonce_coef: InfoNCE 리워드 계수
+            infonce_temperature: InfoNCE temperature 파라미터 (default: 0.07)
+            infonce_emb_type: InfoNCE용 임베딩 타입 (None이면 emb_type과 동일)
+            max_steps: 최대 학습 스텝 수 (novelty annealing 계산에 사용)
         """
         self.__name__ = "LocalEmbeddingRewardFunction"
-        self.data_name = data_name
-        self.reward_type = reward_type
-        self.k = k
-        self.normalize = normalize
-        self.device = device
-        self.emb_batch_size = emb_batch_size
+        self.args = args
+        self.data_name = args.data_name
+        self.reward_type = args.reward_type
+        self.k = args.k
+        self.normalize = args.normalize_rewards
+        self.device = args.device
+        self.emb_batch_size = args.emb_batch_size
+        self.uid_2_target = uid_2_target  # Store for full item pool ranking
         
         # Novelty 관련 파라미터
-        self.novelty_reward = novelty_reward
-        self.novelty_target_rank = novelty_target_rank
-        self.novelty_mode = novelty_mode
+        self.novelty_reward = args.novelty_reward
+        self.novelty_coef = args.novelty_coef
+        self.novelty_target_rank = args.novelty_target_rank
+        self.novelty_mode = args.novelty_mode
+        self.novelty_annealing = args.novelty_annealing
         
         # Popularity 관련 파라미터
-        self.popularity_coef = popularity_coef
+        self.popularity_coef = args.popularity_coef
+        
+        # Target embedding 유사도 리워드 파라미터
+        self.target_emb_reward = args.target_emb_reward
+        self.target_emb_file = args.target_emb_file
+        self.target_emb_coef = args.target_emb_coef
+        
+        # InfoNCE 리워드 파라미터
+        self.infonce_reward = args.infonce_reward
+        self.infonce_coef = args.infonce_coef
+        self.infonce_temperature = args.infonce_temperature
+        self.infonce_emb_type = args.infonce_emb_type if args.infonce_emb_type is not None else args.emb_type
+        
+        # Training 관련 파라미터
+        self.max_steps = args.max_steps
         
         print(f"💰 Reward configuration:")
-        print(f"  - Reward type: {reward_type}")
-        print(f"  - Top-K: {k}")
-        print(f"  - Normalize: {normalize}")
-        if novelty_reward:
+        print(f"  - Reward type: {self.reward_type}")
+        print(f"  - Top-K: {self.k}")
+        print(f"  - Normalize: {self.normalize}")
+        if self.novelty_reward:
             print(f"  - Novelty reward: ENABLED")
+            print(f"  - Novelty coefficient: {self.novelty_coef}")
             print(f"  - Novelty = NDCG × popularity_weight (인기 없는 아이템 장려)")
-        if popularity_coef > 0:
-            print(f"  - Popularity coefficient: {popularity_coef}")
+            if self.novelty_annealing:
+                print(f"  - Novelty annealing: ENABLED")
+                print(f"  - Novelty ratio will increase linearly from 0 to 1 over {self.max_steps} steps")
+                print(f"  - Final reward = (1-ratio)*base + ratio*novelty")
+        if self.popularity_coef > 0:
+            print(f"  - Popularity coefficient: {self.popularity_coef}")
             print(f"  - Popularity bonus for unpopular items (when correct)")
+        if self.target_emb_reward:
+            print(f"  - Target embedding reward: ENABLED")
+            print(f"  - Target embedding file: {self.target_emb_file}")
+            print(f"  - Target embedding coefficient: {self.target_emb_coef}")
+            print(f"  - Reward based on cosine similarity with target embedding")
+        if self.infonce_reward:
+            print(f"  - InfoNCE reward: ENABLED")
+            print(f"  - InfoNCE coefficient: {self.infonce_coef}")
+            print(f"  - InfoNCE temperature: {self.infonce_temperature}")
+            print(f"  - InfoNCE embedding type: {self.infonce_emb_type}")
+            print(f"  - Contrastive learning: maximize target similarity, minimize negative similarity")
         
         # 임베딩 모델 로드
-        print(f"🤖 Loading embedding model: {emb_model_name}")
+        print(f"🤖 Loading embedding model: {args.emb_model_name}")
         from sentence_transformers import SentenceTransformer
-        self.emb_model = SentenceTransformer(emb_model_name, device=device)
-        print(f"✓ Embedding model loaded on {device}")
-        
-        # Negative pool 로드
-        self.negative_pool = load_negative_pool(data_name, data_dir, k)
+        self.emb_model = SentenceTransformer(args.emb_model_name, device=self.device)
+        print(f"✓ Embedding model loaded on {self.device}")
 
-        # prepare candidate set, target comes first
-        self.candidate_tensor = self._prepare_candidate_tensor(uid_2_target, self.negative_pool)
+        total_user_count = 0
+        sequential_file = f"data/{self.data_name}/sequential_data.txt"        
+        with open(sequential_file, 'r') as f:
+            for line in f:
+                total_user_count += 1
+        
+        # k > 100이면 전체 아이템 풀 사용, 그렇지 않으면 negative pool 사용
+        self.use_full_item_pool = (self.k > 100)
+        if self.use_full_item_pool:
+            print(f"⚠️ k={self.k} > 100: Using full item pool for ranking (no negative sampling)")
+            self.negative_pool = None
+            self.candidate_tensor = None  # Will use full item embeddings
+        else:
+            # Negative pool 로드
+            self.negative_pool = load_negative_pool(self.data_name, args.data_dir, self.k)
+            # prepare candidate set, target comes first
+            self.candidate_tensor = self._prepare_candidate_tensor(total_user_count, uid_2_target, self.negative_pool)
         
         # 사전 계산된 아이템 임베딩 로드
-        emb_model_name_dir = emb_model_name.split("/")[-1]
-        item_embedding_file_path = f"data_emb/{data_name}_{emb_type}_{emb_model_name_dir}.pt"
+        emb_model_name_dir = args.emb_model_name.split("/")[-1]
+        item_embedding_file_path = f"data_emb/{self.data_name}_{args.emb_type}_{emb_model_name_dir}_emb.pt"
         print(f"📦 Loading pre-computed item embeddings from: {item_embedding_file_path}")
-        self.item_embeddings = torch.load(item_embedding_file_path, map_location=device)
+        self.item_embeddings = torch.load(item_embedding_file_path, map_location=self.device)
         print(f"✓ Loaded embeddings for {len(self.item_embeddings)} items")
+        
+        # InfoNCE용 추가 임베딩 로드 (필요 시)
+        if self.infonce_reward and self.infonce_emb_type != args.emb_type:
+            infonce_embedding_file_path = f"data_emb/{self.data_name}_{self.infonce_emb_type}_{emb_model_name_dir}_emb.pt"
+            print(f"📦 Loading InfoNCE embeddings from: {infonce_embedding_file_path}")
+            self.infonce_item_embeddings = torch.load(infonce_embedding_file_path, map_location=self.device)
+            print(f"✓ Loaded InfoNCE embeddings for {len(self.infonce_item_embeddings)} items")
+        else:
+            # 같은 임베딩 사용
+            self.infonce_item_embeddings = self.item_embeddings if self.infonce_reward else None
+        
+        # Target embeddings 준비 (target_emb_reward 사용 시)
+        if self.target_emb_reward:
+            self.target_embeddings = self._prepare_target_embeddings(uid_2_target)
+            print(f"✓ Prepared target embeddings for {len(uid_2_target)} users")
+        else:
+            self.target_embeddings = None
         
         # 아이템 인기도 계산 (train set에서)
         # Novelty 또는 Popularity reward 사용 시 필요
         if self.novelty_reward or self.popularity_coef > 0:
             self.item_popularity_weights = self._compute_item_popularity(
-                uid_2_target, self.negative_pool, data_name, data_dir
+                uid_2_target, self.negative_pool, self.data_name, args.data_dir
             )
         else:
             self.item_popularity_weights = None
 
-    def _prepare_candidate_tensor(self, uid_2_target: Dict[int, int], neg_pool: Dict[int, List[int]]) -> torch.Tensor:
-        candidate_tensor = torch.zeros(len(uid_2_target)+1, self.k, dtype=torch.long)
+    def _prepare_candidate_tensor(self, total_user_count: int, uid_2_target: Dict[int, int], neg_pool: Dict[int, List[int]]) -> torch.Tensor:
+        candidate_tensor = torch.zeros(total_user_count+1, self.k, dtype=torch.long)
         for uid, target_id in uid_2_target.items():
             candidate_tensor[uid] = torch.tensor([target_id] + neg_pool[uid], dtype=torch.long)
         return candidate_tensor
+    
+    def _prepare_target_embeddings(self, uid_2_target: Dict[int, int]) -> torch.Tensor:
+        """
+        각 사용자의 타겟 아이템 임베딩을 준비
+        
+        Args:
+            uid_2_target: 사용자 ID to 타겟 아이템 ID 매핑
+            
+        Returns:
+            target_embeddings: [max_uid+1, emb_dim] 각 사용자의 타겟 임베딩
+        """
+        if self.target_emb_file is not None:
+            target_embeddings = torch.load(f"data_emb/{self.args.target_emb_file}", map_location=self.device)
+            return target_embeddings
+        
+        max_uid = max(uid_2_target.keys())
+        emb_dim = self.item_embeddings.shape[1]
+        
+        # 사용자별 타겟 임베딩 텐서 초기화
+        target_embeddings = torch.zeros(max_uid + 1, emb_dim, device=self.device)
+        
+        for uid, target_id in uid_2_target.items():
+            target_embeddings[uid] = self.item_embeddings[target_id]
+        
+        return target_embeddings
     
     def _compute_item_popularity(
         self, 
@@ -746,35 +1165,217 @@ class LocalEmbeddingRewardFunction:
         
         return item_weights
     
-    def _compute_similarity_scores(
-        self,
-        generated_texts: List[str],
-        user_ids: torch.Tensor,
-    ) -> torch.Tensor:
+    def _encode_texts(self, generated_texts: List[str]) -> torch.Tensor:
         """
-        Compute similarity scores between generated texts and candidate set
-        Args:
-            generated_texts: [batch_size] generated texts
-            user_ids: [batch_size] user ids
-        Returns:
-            ranks: [batch_size] ranks of target items
-        """
-        batch_size = len(generated_texts)
+        생성된 텍스트를 임베딩으로 변환
         
-        # 1. 생성된 텍스트 임베딩 계산
-        query_embeddings = self.emb_model.encode(
+        Args:
+            generated_texts: [batch_size] 생성된 텍스트
+            
+        Returns:
+            embeddings: [batch_size, emb_dim] 임베딩
+        """
+        embeddings = self.emb_model.encode(
             generated_texts,
             convert_to_tensor=True,
             show_progress_bar=False,
             device=self.device,
             batch_size=self.emb_batch_size,
-        )  # [batch_size, emb_dim]
+        )
+        return embeddings
+    
+    def _compute_similarity_scores(
+        self,
+        query_embeddings: torch.Tensor,
+        user_ids: torch.Tensor,
+    ) -> torch.Tensor:
+        """
+        Compute similarity scores between query embeddings and candidate set
+        Args:
+            query_embeddings: [batch_size, emb_dim] query embeddings
+            user_ids: [batch_size] user ids
+        Returns:
+            ranks: [batch_size] ranks of target items
+        """
+        if self.use_full_item_pool:
+            # 전체 아이템 풀에 대해 유사도 계산
+            # query_embeddings: [batch_size, emb_dim]
+            # item_embeddings: [num_items, emb_dim]
+            scores = torch.mm(query_embeddings, self.item_embeddings.T)  # [batch_size, num_items]
+            
+            # 각 사용자의 target item 가져오기
+            target_item_ids = torch.tensor(
+                [self.uid_2_target[uid] for uid in user_ids],
+                device=self.device
+            )  # [batch_size]
+            
+            # Target item의 점수
+            target_scores = scores[torch.arange(scores.size(0), device=self.device), target_item_ids]  # [batch_size]
+            
+            # Rank 계산: target보다 높은 점수를 가진 아이템의 개수 + 1
+            ranks = (scores > target_scores.unsqueeze(1)).sum(dim=1) + 1
+        else:
+            # Negative pool 기반 계산 (기존 로직)
+            batch_candidate_tensor = self.candidate_tensor[user_ids]
+            scores = torch.bmm(query_embeddings.unsqueeze(1), self.item_embeddings[batch_candidate_tensor].transpose(1, 2)).squeeze(1)
+            target_scores = scores[:, 0].unsqueeze(1)
+            ranks = (scores > target_scores).sum(dim=1) + 1
         
-        batch_candidate_tensor = self.candidate_tensor[user_ids]
-        scores = torch.bmm(query_embeddings.unsqueeze(1), self.item_embeddings[batch_candidate_tensor].transpose(1, 2)).squeeze(1)
-        target_scores = scores[:, 0].unsqueeze(1)
-        ranks = (scores > target_scores).sum(dim=1) + 1
         return ranks
+    
+    def _compute_target_embedding_reward(
+        self,
+        query_embeddings: torch.Tensor,
+        user_ids: torch.Tensor,
+    ) -> torch.Tensor:
+        """
+        타겟 임베딩과의 유사도 기반 리워드 계산
+        
+        생성된 텍스트가 타겟 임베딩과 유사할수록, 
+        그리고 negative 임베딩들보다 타겟과 더 유사할수록 높은 리워드
+        
+        Args:
+            query_embeddings: [batch_size, emb_dim] 쿼리 임베딩
+            user_ids: [batch_size] 사용자 ID
+            
+        Returns:
+            rewards: [batch_size] 타겟 임베딩 유사도 리워드
+                    (타겟 유사도 - negative 평균 유사도)
+        """
+        # L2 정규화 (코사인 유사도를 위해)
+        query_embeddings = torch.nn.functional.normalize(query_embeddings, p=2, dim=1)
+        
+        # 2. 타겟 임베딩과의 유사도 계산
+        target_embs = self.target_embeddings[user_ids]  # [batch_size, emb_dim]
+        target_embs = torch.nn.functional.normalize(target_embs, p=2, dim=1)
+        
+        target_similarities = (query_embeddings * target_embs).sum(dim=1)  # [batch_size]
+        
+        if self.use_full_item_pool:
+            # 전체 아이템 풀 사용: 타겟을 제외한 모든 아이템을 negative로 사용
+            # 메모리 효율을 위해 샘플링하거나, 전체 아이템의 평균 유사도를 계산
+            # 여기서는 전체 아이템 임베딩의 평균 유사도를 사용
+            all_item_embs = torch.nn.functional.normalize(self.item_embeddings, p=2, dim=1)  # [num_items, emb_dim]
+            
+            # 타겟 아이템 ID
+            target_item_ids = torch.tensor(
+                [self.uid_2_target[uid] for uid in user_ids],
+                device=self.device
+            )  # [batch_size]
+            
+            # 전체 아이템과의 유사도 계산
+            all_similarities = torch.mm(query_embeddings, all_item_embs.T)  # [batch_size, num_items]
+            
+            # 타겟을 제외한 평균 유사도 계산
+            batch_size = all_similarities.size(0)
+            num_items = all_similarities.size(1)
+            
+            # 타겟 마스크 생성
+            mask = torch.ones(batch_size, num_items, device=self.device, dtype=torch.bool)
+            mask[torch.arange(batch_size, device=self.device), target_item_ids] = False
+            
+            # 타겟을 제외한 negative들의 평균 유사도
+            negative_mean_similarities = all_similarities[mask].view(batch_size, -1).mean(dim=1)
+        else:
+            # 3. Negative 임베딩들과의 평균 유사도 계산 (기존 로직)
+            batch_candidate_tensor = self.candidate_tensor[user_ids]  # [batch_size, k]
+            negative_ids = batch_candidate_tensor[:, 1:]  # [batch_size, k-1] (첫 번째는 target 제외)
+            
+            # 전체 타겟 임베딩과의 유사도 계산
+            all_similarities = torch.mm(query_embeddings, self.target_embeddings.T)  # [batch_size, num_users]
+            
+            # 평균 유사도 계산
+            negative_mean_similarities = all_similarities.mean(dim=1)  # [batch_size]
+        
+        # 4. 상대적 리워드 계산: 타겟과의 유사도가 negative 평균보다 얼마나 높은지
+        rewards = target_similarities - negative_mean_similarities
+        
+        return rewards
+    
+    def _compute_infonce_reward(
+        self,
+        query_embeddings: torch.Tensor,
+        user_ids: torch.Tensor,
+    ) -> torch.Tensor:
+        """
+        InfoNCE (대조 학습) 리워드 계산
+        
+        InfoNCE loss를 reward로 변환:
+        reward = log(exp(sim(q, pos)/tau) / (exp(sim(q, pos)/tau) + sum(exp(sim(q, neg_i)/tau))))
+        
+        타겟과의 유사도는 높이고, negative들과의 유사도는 낮추도록 장려
+        
+        Args:
+            query_embeddings: [batch_size, emb_dim] 쿼리 임베딩
+            user_ids: [batch_size] 사용자 ID
+            
+        Returns:
+            rewards: [batch_size] InfoNCE 리워드 (높을수록 좋음)
+        """
+        # L2 정규화 (코사인 유사도를 위해)
+        query_embeddings = torch.nn.functional.normalize(query_embeddings, p=2, dim=1)
+        
+        if self.use_full_item_pool:
+            # 전체 아이템 풀 사용
+            # 타겟 아이템 ID
+            target_ids = torch.tensor(
+                [self.uid_2_target[uid] for uid in user_ids],
+                device=self.device
+            )  # [batch_size]
+            
+            # InfoNCE용 임베딩 사용
+            target_embs = self.infonce_item_embeddings[target_ids]  # [batch_size, emb_dim]
+            target_embs = torch.nn.functional.normalize(target_embs, p=2, dim=1)
+            
+            all_item_embs = torch.nn.functional.normalize(self.infonce_item_embeddings, p=2, dim=1)  # [num_items, emb_dim]
+            
+            # 1. 타겟과의 유사도 계산
+            pos_sim = (query_embeddings * target_embs).sum(dim=1)  # [batch_size]
+            pos_sim = pos_sim / self.infonce_temperature
+            
+            # 2. 전체 아이템들과의 유사도 계산 (타겟 제외)
+            all_sims = torch.mm(query_embeddings, all_item_embs.T)  # [batch_size, num_items]
+            all_sims = all_sims / self.infonce_temperature
+            
+            # 3. InfoNCE 계산
+            # log(exp(pos_sim) / sum(exp(all_sims)))
+            log_sum_exp = torch.logsumexp(all_sims, dim=1)  # [batch_size]
+            infonce_rewards = pos_sim - log_sum_exp  # [batch_size]
+        else:
+            # Candidate tensor 가져오기 (기존 로직)
+            batch_candidate_tensor = self.candidate_tensor[user_ids]  # [batch_size, k]
+            target_ids = batch_candidate_tensor[:, 0]  # [batch_size] - target
+            negative_ids = batch_candidate_tensor[:, 1:]  # [batch_size, k-1] - negatives
+            
+            # InfoNCE용 임베딩 사용
+            target_embs = self.infonce_item_embeddings[target_ids]  # [batch_size, emb_dim]
+            target_embs = torch.nn.functional.normalize(target_embs, p=2, dim=1)
+            
+            negative_embs = self.infonce_item_embeddings[negative_ids]  # [batch_size, k-1, emb_dim]
+            negative_embs = torch.nn.functional.normalize(negative_embs, p=2, dim=2)
+            
+            # 1. 타겟과의 유사도 계산
+            pos_sim = (query_embeddings * target_embs).sum(dim=1)  # [batch_size]
+            pos_sim = pos_sim / self.infonce_temperature
+            
+            # 2. Negative들과의 유사도 계산
+            neg_sims = torch.bmm(
+                query_embeddings.unsqueeze(1),  # [batch_size, 1, emb_dim]
+                negative_embs.transpose(1, 2)   # [batch_size, emb_dim, k-1]
+            ).squeeze(1)  # [batch_size, k-1]
+            neg_sims = neg_sims / self.infonce_temperature
+            
+            # 3. InfoNCE 계산
+            # log(exp(pos_sim) / (exp(pos_sim) + sum(exp(neg_sims))))
+            # = pos_sim - log(exp(pos_sim) + sum(exp(neg_sims)))
+            # = pos_sim - logsumexp([pos_sim, neg_sims])
+            
+            all_sims = torch.cat([pos_sim.unsqueeze(1), neg_sims], dim=1)  # [batch_size, k]
+            log_sum_exp = torch.logsumexp(all_sims, dim=1)  # [batch_size]
+            
+            infonce_rewards = pos_sim - log_sum_exp  # [batch_size]
+        
+        return infonce_rewards
     
     def __call__(
         self,
@@ -788,21 +1389,28 @@ class LocalEmbeddingRewardFunction:
         Args:
             generated_texts: [batch_size] 생성된 텍스트
             user_ids: [batch_size] 사용자 ID (required)
-            **kwargs: 추가 파라미터 (targets, histories 등은 무시됨)
+            **kwargs: 추가 파라미터 (targets, histories, trainer_state 등)
         
         Returns:
             rewards: [batch_size] 리워드 값 
             
-            If novelty_reward=True:
-                rewards = NDCG × popularity_weight
+            If novelty_reward=True and novelty_annealing=False:
+                rewards = novelty_coef × (NDCG × popularity_weight)
                 (인기 없는 아이템을 높은 rank로 예측할수록 높은 보상)
+            
+            If novelty_reward=True and novelty_annealing=True:
+                novelty_ratio = current_step / max_steps (0 → 1 선형 증가)
+                rewards = (1 - novelty_ratio) * base_reward + novelty_ratio * novelty_coef * novelty_reward
             
             Else:
                 rewards = base_reward (NDCG/Hit/MRR 등)
         """
         
+        # 생성된 텍스트를 임베딩으로 변환 (한 번만 수행)
+        query_embeddings = self._encode_texts(generated_texts)
+        
         # rank 계산 (target + negatives)
-        ranks = self._compute_similarity_scores(generated_texts, user_ids)
+        ranks = self._compute_similarity_scores(query_embeddings, user_ids)
         
         # 기본 리워드 타입에 따라 계산
         if self.reward_type == "ndcg":
@@ -820,22 +1428,59 @@ class LocalEmbeddingRewardFunction:
         
         # Novelty reward 사용 여부에 따라 분기
         if self.novelty_reward and self.item_popularity_weights is not None:
-            # Novelty reward 사용: rewards = NDCG × item_popularity_weights
-            batch_candidate_tensor = self.candidate_tensor[user_ids]  # [batch_size, k]
-            target_item_ids = batch_candidate_tensor[:, 0]  # [batch_size] - target은 항상 첫 번째
+            # Novelty reward 계산
+            if self.use_full_item_pool:
+                # 전체 아이템 풀 사용 시: uid_2_target에서 직접 가져오기
+                target_item_ids = torch.tensor(
+                    [self.uid_2_target[uid] for uid in user_ids],
+                    device=self.device
+                )  # [batch_size]
+            else:
+                # Negative pool 사용 시: candidate_tensor에서 가져오기
+                batch_candidate_tensor = self.candidate_tensor[user_ids]  # [batch_size, k]
+                target_item_ids = batch_candidate_tensor[:, 0]  # [batch_size] - target은 항상 첫 번째
             
             # Target item의 popularity weight
             item_weights = self.item_popularity_weights[target_item_ids]  # [batch_size]
             
             # Novelty = NDCG × popularity_weight
-            rewards = calculate_novelty_ndcg(
+            novelty_rewards = calculate_novelty_ndcg(
                 ranks, 
                 item_weights=item_weights,
                 k=self.k,
             )
+            
+            # Novelty annealing 적용 여부에 따라 분기
+            if self.novelty_annealing:
+                # trainer_state에서 현재 step 정보 가져오기
+                trainer_state = kwargs.get("trainer_state", None)
+                
+                if trainer_state is not None and hasattr(trainer_state, "global_step"):
+                    current_step = trainer_state.global_step
+                    # Novelty ratio: 0 (초반) → 1 (후반) 선형 증가
+                    novelty_ratio = min(1.0, current_step / max(1, self.max_steps))
+                else:
+                    # trainer_state가 없으면 기본값 0.5 사용 (중간값)
+                    novelty_ratio = 0.5
+                
+                # 선형 보간: (1-ratio)*base + ratio*novelty, novelty_coef 적용
+                rewards = (1.0 - novelty_ratio) * base_rewards + novelty_ratio * self.novelty_coef * novelty_rewards
+            else:
+                # Annealing 없이 novelty reward만 사용, novelty_coef 적용
+                rewards = self.novelty_coef * novelty_rewards
         else:
             # 기본 리워드 사용
             rewards = base_rewards
+        
+        # Target embedding 유사도 리워드 추가
+        if self.target_emb_reward and self.target_embeddings is not None:
+            target_emb_rewards = self._compute_target_embedding_reward(query_embeddings, user_ids)
+            rewards = rewards + self.target_emb_coef * target_emb_rewards
+        
+        # InfoNCE 리워드 추가
+        if self.infonce_reward and self.infonce_item_embeddings is not None:
+            infonce_rewards = self._compute_infonce_reward(query_embeddings, user_ids)
+            rewards = rewards + self.infonce_coef * infonce_rewards
         
         # 정규화 (optional)
         if self.normalize and rewards.std() > 0:

@@ -12,10 +12,12 @@ import argparse
 import json
 import gc
 import numpy as np
+import logging as std_logging
 from datetime import datetime
 from pathlib import Path
 from typing import List, Dict, Optional
 from tqdm import tqdm
+import contextlib
 
 from trl import GRPOTrainer, GRPOConfig
 from trl.extras.profiling import profiling_decorator, profiling_context
@@ -23,12 +25,20 @@ from trl.extras.profiling import profiling_decorator, profiling_context
 from transformers import AutoTokenizer, AutoModelForCausalLM
 from vllm import LLM, SamplingParams
 from vllm.pooling_params import PoolingParams
+from vllm.distributed.parallel_state import cleanup_dist_env_and_memory
+from vllm.distributed.parallel_state import (
+    destroy_model_parallel,
+    destroy_distributed_environment,
+)
 
 from utils.reward_function import (
     RecRewardFrunction, 
     calculate_ndcg, 
     calculate_hit_rate,
-    LocalEmbeddingRewardFunction
+    LocalEmbeddingRewardFunction,
+    SimilarHistoryItemMentionReward,
+    BrandMentionReward,
+    CategoryMentionReward,
 )
 from utils.dataset import create_dataloaders
 from evaluator import RecommendationEvaluator
@@ -36,7 +46,11 @@ from evaluator import RecommendationEvaluator
 from accelerate import logging
 from accelerate.utils import gather
 
+import torch.distributed as dist
+from numba import cuda
 
+import wandb
+import random
 
 logger = logging.get_logger(__name__)
 
@@ -101,6 +115,16 @@ class GRPOTrainerWrapper:
     def __init__(self, args):
         self.args = args
         
+        # wandb 초기화 및 args 전달
+        if args.report_to == "wandb":
+            print(f"📊 Initializing Weights & Biases...")
+            wandb.init(
+                project="rl4rec",
+                name=args.run_name,
+                config=vars(args),  # args의 모든 요소를 wandb config로 전달
+            )
+            print(f"✓ Wandb initialized with all args")
+        
         # Ray 초기화 (use_local_embedding이 False인 경우에만)
         if not args.use_local_embedding:
             if not ray.is_initialized():
@@ -121,31 +145,6 @@ class GRPOTrainerWrapper:
             trust_remote_code=True,
         )
         
-        # GRPO Config
-        grpo_config = GRPOConfig(
-            output_dir=args.checkpoint_dir,
-            num_train_epochs=args.num_epochs,
-            per_device_train_batch_size=args.batch_size,
-            gradient_accumulation_steps=args.gradient_accumulation_steps,
-            learning_rate=args.learning_rate,
-            logging_steps=args.log_interval,
-            eval_steps=args.eval_interval,
-            save_steps=args.save_interval,
-            save_total_limit=args.save_total_limit,
-            max_grad_norm=args.max_grad_norm,
-            seed=args.seed,
-            bf16=args.bf16,
-            report_to=args.report_to if args.report_to != "none" else None,
-            run_name=args.run_name,
-            # GRPO specific
-            num_generations=args.num_sample_generations,
-            temperature=args.temperature,
-            max_completion_length=args.max_new_tokens,
-            max_steps=args.max_steps,
-            include_for_metrics=["reward", "entropy", "grad_norm", "epoch"]
-        )
-        
-        # GRPO Trainer
 
         
         # 데이터로더 생성 (create_dataloaders 함수 사용)
@@ -157,47 +156,130 @@ class GRPOTrainerWrapper:
             self.item_metadata,
         ) = create_dataloaders(args, tokenizer=self.tokenizer)
         
-        print(f"💰 Creating reward function: {args.reward_type}@{args.k}")
-        if args.use_local_embedding:
-            print(f"  Using local embedding-based reward calculation")
-            self.reward_fn = LocalEmbeddingRewardFunction(
-                uid_2_target=self.train_dataset.target_dict,
-                data_name=args.data_name,
-                reward_type=args.reward_type,
-                k=args.k,
-                normalize=args.normalize_rewards,
-                emb_model_name=args.emb_model_name,
-                emb_type=args.emb_type,
-                device=args.device,
-                emb_batch_size=args.emb_batch_size,
-                novelty_reward=args.novelty_reward,
-                novelty_target_rank=args.novelty_target_rank,
-                novelty_mode=args.novelty_mode,
-                popularity_coef=args.popularity_coef,
+        if args.num_epochs > 0:
+
+            # GRPO Config
+            grpo_config = GRPOConfig(
+                output_dir=args.checkpoint_dir,
+                num_train_epochs=args.num_epochs,
+                per_device_train_batch_size=args.batch_size,
+                gradient_accumulation_steps=args.gradient_accumulation_steps,
+                learning_rate=args.learning_rate,
+
+                logging_steps=args.log_interval,
+                eval_steps=args.eval_interval,
+                save_steps=args.save_interval,
+                save_total_limit=args.save_total_limit,
+                
+                max_grad_norm=args.max_grad_norm,
+                seed=args.seed,
+                bf16=args.bf16,
+                report_to=args.report_to if args.report_to != "none" else None,
+                run_name=args.run_name,
+                
+                # Loss type
+                loss_type=args.loss_type,
+                importance_sampling_level=args.importance_sampling_level,
+                
+                # GRPO specific
+                num_generations=args.num_sample_generations,
+                temperature=args.train_temperature,
+                max_steps=args.max_steps,
+
+                # Generation
+                max_completion_length=args.max_new_tokens,
+                repetition_penalty=1.1,
+                top_p=0.95,
+
+                # vLLM
+                use_vllm=True,
+                vllm_mode="colocate",
+                vllm_gpu_memory_utilization=args.train_vllm_gpu_memory_utilization,
+                vllm_max_model_length=args.max_length+args.max_new_tokens,
+                vllm_enable_sleep_mode=False,
+
+                include_for_metrics=["reward", "entropy", "grad_norm", "epoch"]
             )
-        else:
-            print(f"  Using RetrievalService-based reward calculation")
-            self.reward_fn = RecRewardFrunction(
-                retrieval_service_name=args.retrieval_service_name,
-                namespace=args.namespace,
-                data_name=args.data_name,
-                reward_type=args.reward_type,
-                k=args.k,
-                normalize=args.normalize_rewards,
-                test_target=args.test_target,
+            
+            # GRPO Trainer
+            print(f"💰 Creating reward functions")
+            
+            # 복수의 reward function 리스트 생성
+            reward_funcs = []
+            
+            # 1. 기본 reward function (embedding-based 또는 retrieval-based)
+            print(f"  [1] Base reward: {args.reward_type}@{args.k}")
+            if args.use_local_embedding:
+                print(f"      Using local embedding-based reward calculation")
+                base_reward_fn = LocalEmbeddingRewardFunction(
+                    args=args,
+                    uid_2_target=self.train_dataset.target_dict,
+                )
+            else:
+                print(f"      Using RetrievalService-based reward calculation")
+                base_reward_fn = RecRewardFrunction(
+                    retrieval_service_name=args.retrieval_service_name,
+                    namespace=args.namespace,
+                    data_name=args.data_name,
+                    reward_type=args.reward_type,
+                    k=args.k,
+                    normalize=args.normalize_rewards,
+                    test_target=args.test_target,
+                )
+            reward_funcs.append(base_reward_fn)
+            
+            # 2. Similar History Item Mention Reward (옵션)
+            if args.use_similar_history_reward:
+                print(f"  [2] Similar History Item Mention Reward: +1.0 for mentioning similar item title (first 3 words)")
+                # 임베딩 로드 (캐싱을 위해)
+                emb_model_name_dir = args.emb_model_name.split("/")[-1]
+                item_embedding_file_path = f"data_emb/{args.data_name}_{args.emb_type}_{emb_model_name_dir}_emb.pt"
+                item_embeddings = torch.load(item_embedding_file_path, map_location=args.device)
+                
+                similar_history_reward_fn = SimilarHistoryItemMentionReward(
+                    data_name=args.data_name,
+                    item_embeddings=item_embeddings,
+                    uid_2_target=self.train_dataset.target_dict,
+                    device=args.device,
+                    use_position_weight=args.similar_history_position_weight,
+                    position_decay=args.similar_history_position_decay,
+                )
+                reward_funcs.append(similar_history_reward_fn)
+            
+            # 3. Brand Mention Reward (옵션)
+            if args.use_brand_reward:
+                print(f"  [3] Brand Mention Reward: +0.5 for mentioning target brand")
+                brand_reward_fn = BrandMentionReward(
+                    data_name=args.data_name,
+                    device=args.device,
+                )
+                reward_funcs.append(brand_reward_fn)
+            
+            # 4. Category Mention Reward (옵션)
+            if args.use_category_reward:
+                print(f"  [4] Category Mention Reward: +0.5 for mentioning target category")
+                category_reward_fn = CategoryMentionReward(
+                    data_name=args.data_name,
+                    device=args.device,
+                )
+                reward_funcs.append(category_reward_fn)
+            
+            print(f"  Total reward functions: {len(reward_funcs)}")
+            
+            # reward_funcs가 1개면 단일 함수로, 2개 이상이면 리스트로 전달
+            # reward_funcs_input = reward_funcs[0] if len(reward_funcs) == 1 else reward_funcs
+
+            print(f"🎯 Initializing GRPO Trainer...")
+            self.grpo_trainer = GRPOTrainerRecReward(
+                model=self.model,
+                args=grpo_config,
+                train_dataset=self.train_dataset,
+                eval_dataset=self.valid_dataset,
+                reward_funcs=reward_funcs,
+                processing_class=self.tokenizer,
             )
 
-        print(f"🎯 Initializing GRPO Trainer...")
-        self.grpo_trainer = GRPOTrainerRecReward(
-            model=self.model,
-            args=grpo_config,
-            train_dataset=self.train_dataset,
-            eval_dataset=self.valid_dataset,
-            reward_funcs=self.reward_fn,
-            processing_class=self.tokenizer,
-        )
-    
-    def evaluate_final_metrics(self, dataset, split="test"):
+    def evaluate_final_metrics(self, split="test"):
         """
         최종 평가: hit@k, ndcg@k (k=5,10,20)를 계산
         RecommendationEvaluator 클래스를 사용하여 평가 수행
@@ -205,31 +287,29 @@ class GRPOTrainerWrapper:
         print(f"\n{'='*80}")
         print("🧹 Cleaning up training resources before evaluation...")
         print(f"{'='*80}")
+
+        if split == "test":
+            dataset = self.test_dataset
+        elif split == "valid":
+            dataset = self.valid_dataset
+        else:
+            raise ValueError(f"Invalid split: {split}")
         
-        # GPU 메모리 정리 - 더 확실하게
-        if hasattr(self, 'model') and self.model is not None:
-            self.model.cpu()
-            del self.model
-            self.model = None
-        
-        if hasattr(self, 'grpo_trainer') and self.grpo_trainer is not None:
-            # trainer 내부의 model, optimizer 등을 정리
-            if hasattr(self.grpo_trainer, 'model'):
-                self.grpo_trainer.model = None
-            if hasattr(self.grpo_trainer, 'accelerator'):
-                self.grpo_trainer.accelerator.free_memory()
+        if hasattr(self, 'grpo_trainer'):
             del self.grpo_trainer
             self.grpo_trainer = None
-        
-        # 강제 메모리 정리
-        torch.cuda.empty_cache()
+            print("✓ GRPO Trainer cleaned")
+
         gc.collect()
+        torch.cuda.empty_cache()
         torch.cuda.synchronize()
-        
+
         # 메모리 사용량 출력
         if torch.cuda.is_available():
+            print("=" * 80)
             print(f"💾 GPU Memory after cleanup: {torch.cuda.memory_allocated() / 1024**3:.2f} GB allocated")
             print(f"💾 GPU Memory reserved: {torch.cuda.memory_reserved() / 1024**3:.2f} GB reserved")
+            print("=" * 80)
 
         # Evaluator 인스턴스 생성 및 평가 실행
         evaluator = RecommendationEvaluator(self.args, self.args.final_checkpoint_dir)
@@ -255,7 +335,7 @@ class GRPOTrainerWrapper:
         print("=" * 80)
         print("✓ Training completed!")        
         # 최종 테스트 평가
-        test_metrics = self.evaluate_final_metrics(self.test_dataset, split="test")
+        # test_metrics = self.evaluate_final_metrics(self.test_dataset, split="test")
         
 
 
@@ -279,60 +359,122 @@ def parse_args():
     parser.add_argument("--max_length", type=int, default=1024*4)
     parser.add_argument("--max_new_tokens", type=int, default=512)
     parser.add_argument("--max_emb_length", type=int, default=512)
-    parser.add_argument("--temperature", type=float, default=1.0)
+    parser.add_argument("--temperature", type=float, default=0.01)
     parser.add_argument("--use_ref_model", action="store_true", help="Use reference model for KL penalty")
     
     # Embedding Model for Evaluation
     parser.add_argument("--emb_model_name", type=str, default="mixedbread-ai/mxbai-embed-large-v1")
-    parser.add_argument("--emb_type", type=str, default="review_description", help="Type of item text to embed (title, description, etc.)")
+    parser.add_argument("--emb_type", type=str, default="item_preference_1024_gemma-3-1b-it", help="Type of item text to embed (title, description, etc.)")
     
     # Data
     parser.add_argument("--data_dir", type=str, default="data")
-    parser.add_argument("--sequential_file", type=str,
-                        default="data/beauty/sequential_data.txt")
     
     # Prompt Generation
+    parser.add_argument("--prompt_type", type=str, default="seq_rec", help="Prompt template")
     parser.add_argument("--use_brand", action="store_true", default=True, help="Include brand in prompt")
     parser.add_argument("--use_category", action="store_true", default=True, help="Include category in prompt")
     parser.add_argument("--use_description", action="store_true", help="Include description in prompt")
     parser.add_argument("--use_features", action="store_true", help="Include features in prompt")
+    parser.add_argument("--use_date", action="store_true", default=True, help="Include purchase date information in prompt")
     parser.add_argument("--use_last_item", action="store_true", default=True, help="Emphasize last item")
+    parser.add_argument("--emphasize_recent_item", action="store_true",
+                        help="Emphasize recent purchase item with detailed information including purchase date ('This user's most recent purchase is...' format)")
+    parser.add_argument("--include_target_date", action="store_true",
+                        help="Include target/label item's purchase date at the end of prompt")
     parser.add_argument("--max_history_len", type=int, default=8, help="Max history length")
     parser.add_argument("--history_text_max_length", type=int, default=100, help="Max words per history item")
+    parser.add_argument("--days_filter", type=int, default=None,
+                        help="Filter reviews to only include those within N days of target date")
     parser.add_argument("--test_target", action="store_true", help="Use target text for test")
     
+    # SASRec Integration
+    parser.add_argument("--use_sasrec", action="store_true",
+                        help="Include SASRec recommendations in prompt as reference for query generation")
+    parser.add_argument("--sasrec_top_k", type=int, default=5,
+                        help="Number of top-K SASRec recommendations to include in prompt")
+    
     # GRPO Training
+    parser.add_argument("--loss_type", type=str, default="grpo")
     parser.add_argument("--learning_rate", type=float, default=1e-6)
-    parser.add_argument("--batch_size", type=int, default=4)
-    parser.add_argument("--eval_batch_size", type=int, default=16)
-    parser.add_argument("--gradient_accumulation_steps", type=int, default=4)
-    parser.add_argument("--num_sample_generations", type=int, default=4,
+    parser.add_argument("--batch_size", type=int, default=32)
+    parser.add_argument("--eval_batch_size", type=int, default=64)
+    parser.add_argument("--gradient_accumulation_steps", type=int, default=1)
+    parser.add_argument("--num_sample_generations", type=int, default=8,
                         help="Number of generations per prompt for GRPO")
     parser.add_argument("--max_grad_norm", type=float, default=1.0)
     parser.add_argument("--num_epochs", type=int, default=3)
     parser.add_argument("--max_steps", type=int, default=5000)
     parser.add_argument("--bf16", action="store_true", help="Use bfloat16")
-    
+    parser.add_argument("--train_temperature", type=float, default=0.1)
+    parser.add_argument("--importance_sampling_level", type=str, default="token", choices=["token", "sequence"])
+
     # Reward
     parser.add_argument("--reward_type", type=str, default="ndcg", choices=["ndcg", "hit", "mixed"])
     parser.add_argument("--k", type=int, default=100, help="Top-K for metrics")
     parser.add_argument("--normalize_rewards", action="store_true", help="Normalize rewards")
     parser.add_argument("--num_negs", type=int, default=0, help="Number of negative items")
+    parser.add_argument("--prepend_last_item", action="store_true",)
+    
+    # Multiple Reward Functions
+    parser.add_argument("--use_similar_history_reward", action="store_true",
+                        help="Use reward for mentioning similar history item's title (first 3 words). "
+                             "Reward: +1.0 for mentioning the most similar item from purchase history.")
+    parser.add_argument("--similar_history_position_weight", action="store_true",
+                        help="Enable position-based weighting for similar history reward. "
+                             "Earlier mentions get higher rewards.")
+    parser.add_argument("--similar_history_position_decay", type=float, default=0.5,
+                        help="Position decay factor for similar history reward (0.0-1.0). "
+                             "0.0 = no decay (position-independent), "
+                             "1.0 = full decay (reward becomes 0 at text end). "
+                             "Default: 0.5 (reward halves at text end)")
+    parser.add_argument("--use_brand_reward", action="store_true",
+                        help="Use reward for mentioning target item's brand. "
+                             "Reward: +0.5 for mentioning the brand.")
+    parser.add_argument("--use_category_reward", action="store_true",
+                        help="Use reward for mentioning target item's category. "
+                             "Reward: +0.5 for mentioning any part of the category.")
+
     
     # Novelty Reward (popularity-based reward)
     parser.add_argument("--novelty_reward", action="store_true",
                         help="Use novelty reward: NDCG × popularity_weight "
                              "(인기 없는 아이템을 높은 rank로 예측할수록 높은 보상)")
+    parser.add_argument("--novelty_coef", type=float, default=1.0,
+                        help="Novelty reward coefficient (weight for novelty reward component)")
     parser.add_argument("--novelty_target_rank", type=int, default=20,
                         help="(Deprecated, not used)")
     parser.add_argument("--novelty_mode", type=str, default="gaussian", 
                         choices=["gaussian", "uniform", "inverse"],
                         help="(Deprecated, not used)")
+    parser.add_argument("--novelty_annealing", action="store_true",
+                        help="Enable novelty annealing: gradually increase novelty ratio from 0 to 1 "
+                             "as training progresses. Final reward = (1-ratio)*base + ratio*novelty")
     
     # Popularity Reward (long-tail item bonus)
     parser.add_argument("--popularity_coef", type=float, default=0.0,
                         help="Popularity reward coefficient (0.0 = disabled). "
                              "Rewards predicting unpopular items more.")
+    
+    # Target Embedding Similarity Reward
+    parser.add_argument("--target_emb_reward", action="store_true",
+                        help="Use target embedding similarity reward. "
+                             "Rewards generated text that is similar to target item embedding.")
+    parser.add_argument("--target_emb_file", type=str, default=None,
+                        help="Target embedding file path. If None, uses the same embedding as emb_type.")
+    parser.add_argument("--target_emb_coef", type=float, default=1.0,
+                        help="Target embedding reward coefficient (weight for this reward component)")
+    
+    # InfoNCE Reward
+    parser.add_argument("--infonce_reward", action="store_true",
+                        help="Use InfoNCE (contrastive learning) reward. "
+                             "Maximizes similarity with target while minimizing with negatives.")
+    parser.add_argument("--infonce_coef", type=float, default=1.0,
+                        help="InfoNCE reward coefficient (weight for this reward component)")
+    parser.add_argument("--infonce_temperature", type=float, default=0.07,
+                        help="Temperature parameter for InfoNCE (default: 0.07)")
+    parser.add_argument("--infonce_emb_type", type=str, default=None,
+                        help="Embedding type for InfoNCE (e.g., 'title_emb'). "
+                             "If None, uses the same embedding as emb_type.")
     
     # Local Embedding-based Reward (alternative to RetrievalService)
     parser.add_argument("--use_local_embedding", action="store_true", 
@@ -343,10 +485,10 @@ def parse_args():
     # Logging & Checkpointing
     parser.add_argument("--checkpoint_dir", type=str, default="checkpoints/grpo")
     parser.add_argument("--final_checkpoint_dir", type=str, default="checkpoints/grpo/checkpoint-5000")
-    parser.add_argument("--log_interval", type=int, default=10)
+    parser.add_argument("--log_interval", type=int, default=100)
     parser.add_argument("--eval_interval", type=int, default=100)
     parser.add_argument("--save_interval", type=int, default=500)
-    parser.add_argument("--save_total_limit", type=int, default=3)
+    parser.add_argument("--save_total_limit", type=int, default=1)
     parser.add_argument("--report_to", type=str, default="wandb", help="Logging backend (wandb)")
     
     # Misc
@@ -354,11 +496,22 @@ def parse_args():
     parser.add_argument("--debug", action="store_true")
 
     # vllm for evaluation
+    parser.add_argument("--train_vllm_gpu_memory_utilization", type=float, default=0.5)
     parser.add_argument("--gpu_memory_utilization", type=float, default=0.95)
     parser.add_argument("--eval_emb_gpu_memory_utilization", type=float, default=0.95)
     parser.add_argument("--eval_emb_batch_size", type=int, default=512)
+    parser.add_argument("--eval_max_tokens", type=int, default=512)
     parser.add_argument("--eval_emb_max_length", type=int, default=512)
     parser.add_argument("--eval_samples", type=int, default=100000)
+    parser.add_argument("--dummy_generation", action="store_true", help="Use dummy generation")
+    
+    # Rank-based filtering for training
+    parser.add_argument("--filter_train_csv", type=str, default=None,
+                        help="Path to evaluation CSV file for filtering train set by rank")
+    parser.add_argument("--rank_min", type=int, default=None,
+                        help="Minimum rank for filtering (inclusive, None = no limit)")
+    parser.add_argument("--rank_max", type=int, default=None,
+                        help="Maximum rank for filtering (inclusive, None = no limit)")
     
     return parser.parse_args()
 
@@ -366,10 +519,20 @@ def parse_args():
 def main():
     """Main training function"""
     args = parse_args()
+    args.sequential_file = f"data/{args.data_name}/sequential_data.txt"
+
+    # fix seed
+    torch.manual_seed(args.seed)
+    torch.cuda.manual_seed(args.seed)
+    np.random.seed(args.seed)
+    random.seed(args.seed)
     
-    # Run name 설정
-    if args.run_name is None:
-        args.run_name = f"grpo_{args.reward_type}@{args.k}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+    # vLLM 로깅 레벨 조정 (INFO 메시지 억제)
+    std_logging.getLogger("vllm").setLevel(std_logging.ERROR)
+    
+    # # Run name 설정
+    # if args.run_name is None:
+    #     args.run_name = f"grpo_{args.reward_type}@{args.k}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
     
     # Trainer 초기화 및 학습
     trainer = GRPOTrainerWrapper(args)
@@ -379,27 +542,65 @@ def main():
     finally:
         # 학습 완료 후 명시적으로 모든 리소스 정리
         print("\n" + "="*80)
-        print("🧹 Final cleanup...")
-        print("="*80)
+        # print("🧹 Final cleanup...")
+        # print("="*80)
         
-        # Trainer 내부 리소스 정리
-        if hasattr(trainer, 'model') and trainer.model is not None:
-            del trainer.model
-        if hasattr(trainer, 'grpo_trainer') and trainer.grpo_trainer is not None:
-            del trainer.grpo_trainer
-        if hasattr(trainer, 'reward_fn') and trainer.reward_fn is not None:
-            del trainer.reward_fn
+        # # Trainer 내부 리소스 정리
+        # # vLLM 먼저 정리
+        # if hasattr(trainer, 'grpo_trainer') and trainer.grpo_trainer is not None:
+        #     if hasattr(trainer.grpo_trainer, 'vllm') and trainer.grpo_trainer.vllm is not None:
+        #         print("🧹 Final: Cleaning up vLLM...")
+        #         try:
+        #             vllm_instance = trainer.grpo_trainer.vllm
+        #             if hasattr(vllm_instance, 'llm_engine'):
+        #                 engine = vllm_instance.llm_engine
+        #                 if hasattr(engine, 'shutdown'):
+        #                     engine.shutdown()
+        #                 if hasattr(engine, 'model_executor'):
+        #                     del engine.model_executor
+        #                 del engine
+        #             del vllm_instance
+        #             trainer.grpo_trainer.vllm = None
+        #         except Exception as e:
+        #             print(f"⚠️ Warning during final vLLM cleanup: {e}")
         
-        del trainer
+        # # 중간 정리
+        # cleanup_dist_env_and_memory()
+        # torch.cuda.empty_cache()
+        # gc.collect()
         
-        # GPU 메모리 완전히 해제
-        torch.cuda.empty_cache()
-        gc.collect()
+        # # Model 정리
+        # if hasattr(trainer, 'model') and trainer.model is not None:
+        #     if hasattr(trainer.model, 'cpu'):
+        #         trainer.model.cpu()
+        #     del trainer.model
         
-        if torch.cuda.is_available():
-            torch.cuda.synchronize()
-            print(f"💾 Final GPU Memory: {torch.cuda.memory_allocated() / 1024**3:.2f} GB allocated")
-            print(f"💾 Final GPU Memory reserved: {torch.cuda.memory_reserved() / 1024**3:.2f} GB reserved")
+        # # GRPO Trainer 정리
+        # if hasattr(trainer, 'grpo_trainer') and trainer.grpo_trainer is not None:
+        #     if hasattr(trainer.grpo_trainer, 'model'):
+        #         trainer.grpo_trainer.model = None
+        #     if hasattr(trainer.grpo_trainer, 'accelerator'):
+        #         trainer.grpo_trainer.accelerator = None
+        #     del trainer.grpo_trainer
+        
+        # # Reward function 정리
+        # if hasattr(trainer, 'reward_fn') and trainer.reward_fn is not None:
+        #     # Embedding model 정리
+        #     if hasattr(trainer.reward_fn, 'embedding_model'):
+        #         del trainer.reward_fn.embedding_model
+        #     del trainer.reward_fn
+        
+        # del trainer
+        
+        # # GPU 메모리 완전히 해제
+        # cleanup_dist_env_and_memory()
+        # torch.cuda.empty_cache()
+        # gc.collect()
+        
+        # if torch.cuda.is_available():
+        #     torch.cuda.synchronize()
+        #     print(f"💾 Final GPU Memory: {torch.cuda.memory_allocated() / 1024**3:.2f} GB allocated")
+        #     print(f"💾 Final GPU Memory reserved: {torch.cuda.memory_reserved() / 1024**3:.2f} GB reserved")
     
     print("✓ Done!")
 

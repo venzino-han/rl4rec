@@ -55,7 +55,7 @@ class RetrievalService:
         else:        
             # 실제 데이터셋 로드
             for name in data_names:
-                emb_file = f"data_emb/{name}_{self.args.emb_type}_{self.args.emb_model_name_dir}.pt"
+                emb_file = f"data_emb/{name}_{self.args.emb_type}_{self.args.emb_model_name_dir}_emb.pt"
                 print(f"  Loading: {emb_file}")
                 emb = torch.load(emb_file, map_location=self.device,)
                 indices[name] = emb / emb.norm(dim=-1, keepdim=True)
@@ -164,7 +164,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--emb_type",
         type=str,
-        default="review_description",
+        default="item_meta_only",
         help="Type of embeddings to load (e.g., item, user)"
     )
     parser.add_argument(
