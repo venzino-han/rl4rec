@@ -2,26 +2,38 @@
 
 max_steps=1000
 dataset_names=(beauty toys sports yelp)
-device=5
+device=2
 PROMPT_TYPE="seq_rec"
+
+# Device Tracker 설정
+TRACKER="python3 utils/device_tracker.py"
+trap '$TRACKER free $device' EXIT
+
+# 시작 시 상태 표시
+echo "=========================================="
+echo "Starting drgrpo_pref runs"
+echo "=========================================="
+$TRACKER show-simple
 
 # 학습 실행
 for dataset_name in ${dataset_names[@]}; do
     echo "Training ${dataset_name}..."
-
-for temp in 0.1 0.3 0.6; do
-    RUN_NAME="dr_grpo_${dataset_name}_pref_sequence_128_1000_temp${temp}"
+for temp in 0.6; do
+for lr in 5e-6 2e-6 ; do
+    RUN_NAME="dr_grpo_${dataset_name}_pref_sequence_k1000_128_1000_temp${temp}_lr${lr}"
     CHECKPOINT_DIR="checkpoints/$RUN_NAME"
     FINAL_CHECKPOINT_DIR="$CHECKPOINT_DIR/checkpoint-$max_steps"
 
+    # Device 할당
+    $TRACKER allocate $device "$RUN_NAME"
+    
     CUDA_VISIBLE_DEVICES=$device python3 src/grpo_train.py \
         --run_name $RUN_NAME \
         --model_name "google/gemma-3-1b-it" \
         --data_name $dataset_name \
         --reward_type "ndcg" \
-        --k 100 \
+        --k 1000 \
         --loss_type "dr_grpo" \
-        --importance_sampling_level sequence \
         --prompt_type $PROMPT_TYPE \
         --emphasize_recent_item \
         --use_brand \
@@ -32,13 +44,12 @@ for temp in 0.1 0.3 0.6; do
         --max_new_tokens 128 \
         --num_epochs 1 \
         --batch_size 32 \
-        --num_sample_generations 4 \
         --train_temperature $temp \
-        --learning_rate 5e-6 \
+        --learning_rate $lr \
         --max_steps $max_steps \
         --checkpoint_dir $CHECKPOINT_DIR \
         --final_checkpoint_dir $FINAL_CHECKPOINT_DIR \
-        --log_interval 20 \
+        --log_interval 10 \
         --eval_interval 5000 \
         --save_interval 1000 \
         --device "cuda" \
@@ -59,6 +70,13 @@ for temp in 0.1 0.3 0.6; do
         --final_checkpoint_dir $FINAL_CHECKPOINT_DIR \
         --device "cuda" \
         "$@"
+    
+    # Device 해제
+    $TRACKER free $device
+    
+    echo "✅ Completed: $RUN_NAME"
+    $TRACKER show-simple
+done
 done
 done
 

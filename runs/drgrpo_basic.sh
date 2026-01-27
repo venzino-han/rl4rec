@@ -2,17 +2,21 @@
 
 max_steps=1000
 dataset_names=(beauty toys sports yelp)
-device=2
+device=1
 PROMPT_TYPE="seq_rec"
 
 # 학습 실행
 for dataset_name in ${dataset_names[@]}; do
     echo "Training ${dataset_name}..."
 
+TRACKER="python3 utils/device_tracker.py"
+
 for temp in 0.1; do
     RUN_NAME="dr_grpo_${dataset_name}_baseline_sequence_128_1000_temp${temp}"
     CHECKPOINT_DIR="checkpoints/$RUN_NAME"
     FINAL_CHECKPOINT_DIR="$CHECKPOINT_DIR/checkpoint-$max_steps"
+
+    $TRACKER allocate $device "$RUN_NAME"
 
     CUDA_VISIBLE_DEVICES=$device python3 src/grpo_train.py \
         --run_name $RUN_NAME \
@@ -59,6 +63,8 @@ for temp in 0.1; do
         --final_checkpoint_dir $FINAL_CHECKPOINT_DIR \
         --device "cuda" \
         "$@"
+
+    $TRACKER free $device
 done
 done
 

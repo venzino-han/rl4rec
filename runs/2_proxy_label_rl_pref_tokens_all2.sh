@@ -1,61 +1,50 @@
 #!/bin/bash
-# GRPO 학습 실행 스크립트
-
-# set -e
-
-# # 작업 디렉토리로 이동
-# cd "$(dirname "$0")/.."
-
-# echo "🚀 Starting GRPO Training for RL4Rec"
-# echo "========================================"
-
-# # Ray 클러스터 확인
-# echo "📡 Checking Ray cluster..."
-# ray status || {
-#     echo "⚠️  Ray cluster not found. Please start retrieval service first:"
-#     echo "   ./runs/run_retrieval.sh"
-#     exit 1
-# }
-
-# # Python 경로 설정
-# export PYTHONPATH="${PYTHONPATH}:$(pwd)/src"
 
 max_steps=1000
-dataset_names=(toys beauty sports yelp)
-device=6
-PROMPT_TYPE="seq_rec"
+dataset_names=(beauty toys sports yelp)
+device=2
+PROMPT_TYPE="seq_rec_new_2"
 
-# 학습 실행
+TRACKER="python3 utils/device_tracker.py"
+
 for dataset_name in ${dataset_names[@]}; do
     echo "Training ${dataset_name}..."
-
-    RUN_NAME="r1_rec_${dataset_name}_temp0_1000"
+for temp in 0.6 0.3 ; do
+for loss_type in dr_grpo; do
+    RUN_NAME="${dataset_name}_proxy_label_100_0.3_${loss_type}_k1000_128_steps${max_steps}_temp${temp}_lr2e-6"
     CHECKPOINT_DIR="checkpoints/$RUN_NAME"
     FINAL_CHECKPOINT_DIR="$CHECKPOINT_DIR/checkpoint-$max_steps"
+
+    $TRACKER allocate $device "$RUN_NAME"
 
     CUDA_VISIBLE_DEVICES=$device python3 src/grpo_train.py \
         --run_name $RUN_NAME \
         --model_name "google/gemma-3-1b-it" \
         --data_name $dataset_name \
         --reward_type "ndcg" \
-        --k 100 \
+        --k 1000 \
+        --loss_type $loss_type \
+        --importance_sampling_level token \
+        --use_local_embedding \
         --prompt_type $PROMPT_TYPE \
-        --emphasize_recent_item \
         --use_brand \
         --use_category \
-        --use_local_embedding \
+        --emphasize_recent_item \
         --emb_model_name "mixedbread-ai/mxbai-embed-large-v1" \
-        --emb_type item_meta_only \
+        --emb_type item_preference_1024_gemma-3-4b-it \
+        --proxy_label_reward \
+        --proxy_k 100 \
+        --proxy_label_coef 0.3 \
         --max_new_tokens 128 \
         --num_epochs 1 \
         --batch_size 32 \
-        --num_sample_generations 4 \
-        --train_temperature 0.01 \
-        --learning_rate 1e-6 \
+        --learning_rate 2e-6 \
+        --train_temperature $temp \
         --max_steps $max_steps \
         --checkpoint_dir $CHECKPOINT_DIR \
         --final_checkpoint_dir $FINAL_CHECKPOINT_DIR \
-        --log_interval 20 \
+        --save_total_limit 1 \
+        --log_interval 10 \
         --eval_interval 5000 \
         --save_interval 1000 \
         --device "cuda" \
@@ -66,15 +55,20 @@ for dataset_name in ${dataset_names[@]}; do
         --model_name "google/gemma-3-1b-it" \
         --data_name $dataset_name \
         --emb_model_name "mixedbread-ai/mxbai-embed-large-v1" \
-        --emb_type item_meta_only \
-        --use_local_embedding \
+        --emb_type item_preference_1024_gemma-3-4b-it \
         --prompt_type $PROMPT_TYPE \
-        --temperature 0.01 \
+        --use_local_embedding \
         --emphasize_recent_item \
         --use_brand \
         --use_category \
-        --max_new_tokens 512 \
+        --max_new_tokens 128 \
         --final_checkpoint_dir $FINAL_CHECKPOINT_DIR \
         --device "cuda" \
         "$@"
+
+    $TRACKER free $device
 done
+done
+done
+
+echo "✅ Training completed!"

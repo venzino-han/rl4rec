@@ -1,43 +1,22 @@
 #!/bin/bash
-# GRPO 학습 실행 스크립트
-
-# set -e
-
-# # 작업 디렉토리로 이동
-# cd "$(dirname "$0")/.."
-
-# echo "🚀 Starting GRPO Training for RL4Rec"
-# echo "========================================"
-
-# # Ray 클러스터 확인
-# echo "📡 Checking Ray cluster..."
-# ray status || {
-#     echo "⚠️  Ray cluster not found. Please start retrieval service first:"
-#     echo "   ./runs/run_retrieval.sh"
-#     exit 1
-# }
-
-# # Python 경로 설정
-# export PYTHONPATH="${PYTHONPATH}:$(pwd)/src"
 
 max_steps=1000
-# dataset_names=(beauty toys sports yelp)
+dataset_names=(beauty toys sports yelp)
 dataset_names=(beauty)
 device=5
-PROMPT_TYPE="seq_rec"
+PROMPT_TYPE="seq_rec_new_2"
 
 TRACKER="python3 utils/device_tracker.py"
 
-
-# 학습 실행
 for dataset_name in ${dataset_names[@]}; do
     echo "Training ${dataset_name}..."
-for importance_sampling_level in sequence token; do
-    RUN_NAME="r1_rec_${dataset_name}_rank_${importance_sampling_level}"
+for temp in 0.6 ; do
+for loss_type in dr_grpo; do
+    RUN_NAME="${dataset_name}_new_prompt2_${loss_type}_rank_token_pref_k1000_128_1000_temp${temp}_lr2e-6"
     CHECKPOINT_DIR="checkpoints/$RUN_NAME"
+    FINAL_CHECKPOINT_DIR="$CHECKPOINT_DIR/checkpoint-$max_steps"
 
     $TRACKER allocate $device "$RUN_NAME"
-    FINAL_CHECKPOINT_DIR="$CHECKPOINT_DIR/checkpoint-$max_steps"
 
     CUDA_VISIBLE_DEVICES=$device python3 src/grpo_train.py \
         --run_name $RUN_NAME \
@@ -45,25 +24,27 @@ for importance_sampling_level in sequence token; do
         --data_name $dataset_name \
         --reward_type "ndcg" \
         --k 1000 \
-        --loss_type dr_grpo \
+        --loss_type $loss_type \
+        --importance_sampling_level token \
+        --use_local_embedding \
         --prompt_type $PROMPT_TYPE \
-        --emphasize_recent_item \
-        --importance_sampling_level $importance_sampling_level \
         --use_brand \
         --use_category \
-        --use_local_embedding \
-        --rank_min 1 \
-        --rank_max 3000 \
-        --filter_train_csv results/zeroshot_seq_rec_beauty_train_train_eval_20260120_173119.csv \
+        --emphasize_recent_item \
         --emb_model_name "mixedbread-ai/mxbai-embed-large-v1" \
         --emb_type item_preference_1024_gemma-3-4b-it \
+        --rank_min 1 \
+        --rank_max 1000 \
+        --filter_train_csv results/zeroshot_seq_rec_beauty_train_train_eval_20260120_173119.csv \
         --max_new_tokens 128 \
         --num_epochs 1 \
         --batch_size 32 \
         --learning_rate 2e-6 \
+        --train_temperature $temp \
         --max_steps $max_steps \
         --checkpoint_dir $CHECKPOINT_DIR \
         --final_checkpoint_dir $FINAL_CHECKPOINT_DIR \
+        --save_total_limit 1 \
         --log_interval 10 \
         --eval_interval 5000 \
         --save_interval 1000 \
@@ -76,12 +57,12 @@ for importance_sampling_level in sequence token; do
         --data_name $dataset_name \
         --emb_model_name "mixedbread-ai/mxbai-embed-large-v1" \
         --emb_type item_preference_1024_gemma-3-4b-it \
-        --use_local_embedding \
         --prompt_type $PROMPT_TYPE \
+        --use_local_embedding \
         --emphasize_recent_item \
         --use_brand \
         --use_category \
-        --max_new_tokens 512 \
+        --max_new_tokens 128 \
         --final_checkpoint_dir $FINAL_CHECKPOINT_DIR \
         --device "cuda" \
         "$@"
@@ -89,5 +70,6 @@ for importance_sampling_level in sequence token; do
     $TRACKER free $device
 done
 done
+done
 
-$TRACKER free $device
+echo "✅ Training completed!"

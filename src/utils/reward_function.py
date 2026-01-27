@@ -544,7 +544,7 @@ def load_negative_pool(data_name: str, data_dir: str = "data", k: int = 10) -> D
             user_id = int(parts[0])
             neg_items = [int(item_id) for item_id in parts[1:]]
             #random sample k items
-            neg_items = neg_items[:k-1]
+            # neg_items = neg_items[:k-1]
             # neg_items = np.random.choice(neg_items, size=k-1, replace=False).tolist()
             negative_pool[user_id] = neg_items
     
@@ -570,7 +570,8 @@ class SimilarHistoryItemMentionReward:
         device: str = "cuda",
         data_dir: str = "data",
         use_position_weight: bool = False,
-        position_decay: float = 0.5,
+        position_decay: float = 1.0,
+        similarity_threshold: float = 0.7,
     ):
         """
         Args:
@@ -585,6 +586,8 @@ class SimilarHistoryItemMentionReward:
                           0.0 = 위치 무관하게 동일 보상
                           1.0 = 텍스트 끝에서는 보상 0
                           예: 0.5이면 텍스트 끝에서 보상이 절반으로 감소
+            similarity_threshold: 유사도 역치 (0.0 ~ 1.0)
+                                이 값 이하이면 마지막 상호작용 아이템을 선택
         """
         self.__name__ = "SimilarHistoryItemMentionReward"
         self.data_name = data_name
@@ -592,6 +595,7 @@ class SimilarHistoryItemMentionReward:
         self.device = device
         self.use_position_weight = use_position_weight
         self.position_decay = position_decay
+        self.similarity_threshold = similarity_threshold
         
         # 아이템 메타데이터 로드 (title, brand, category)
         with open(f"{data_dir}/{data_name}/meta_text_fix.json", "r") as f:
@@ -599,13 +603,15 @@ class SimilarHistoryItemMentionReward:
         
         print(f"✓ SimilarHistoryItemMentionReward initialization started")
         print(f"  - Loaded metadata for {len(self.item_metadata)} items")
+        print(f"  - Similarity threshold: {self.similarity_threshold}")
+        print(f"    → If max similarity < threshold, use last interacted item")
         if self.use_position_weight:
             print(f"  - Position-based weighting: ENABLED (decay={self.position_decay})")
             print(f"    → Earlier mentions get higher rewards")
         else:
             print(f"  - Position-based weighting: DISABLED")
         
-        # 캐시: user_id -> most_similar_history_item_id
+        # 캐시: user_id -> (most_similar_history_item_id, max_similarity)
         self.similarity_cache = {}
         
         # 전체 데이터에 대해 미리 유사한 아이템 계산
@@ -621,6 +627,7 @@ class SimilarHistoryItemMentionReward:
     ):
         """
         전체 데이터에 대해 타겟과 가장 유사한 히스토리 아이템을 미리 계산
+        유사도가 역치 이하이면 마지막 상호작용 아이템을 선택
         
         Args:
             uid_2_target: 사용자 ID to 타겟 아이템 ID 매핑
@@ -632,6 +639,8 @@ class SimilarHistoryItemMentionReward:
         
         # 정규화된 임베딩 미리 계산 (전체 아이템)
         normalized_embeddings = torch.nn.functional.normalize(self.item_embeddings, p=2, dim=1)
+        
+        fallback_count = 0  # 역치 미만으로 마지막 아이템 사용한 횟수
         
         with open(sequential_file, 'r') as f:
             for line in f:
@@ -659,11 +668,25 @@ class SimilarHistoryItemMentionReward:
                 similarities = torch.mm(target_emb.unsqueeze(0), history_embs.T).squeeze(0)  # [history_len]
                 
                 # 가장 유사한 아이템 찾기
+                max_similarity = similarities.max().item()
                 most_similar_idx = similarities.argmax().item()
-                most_similar_item_id = history[most_similar_idx]
                 
-                # 캐시에 저장
-                self.similarity_cache[user_id] = most_similar_item_id
+                # 유사도가 역치 이하이면 마지막 상호작용 아이템 선택
+                if max_similarity < self.similarity_threshold:
+                    selected_item_id = history[-1]  # 마지막 아이템
+                    fallback_count += 1
+                else:
+                    selected_item_id = history[most_similar_idx]
+                
+                # 캐시에 저장 (아이템 ID와 최대 유사도)
+                self.similarity_cache[user_id] = (selected_item_id, max_similarity)
+        
+        # 통계 출력
+        total_users = len(self.similarity_cache)
+        if total_users > 0:
+            fallback_ratio = (fallback_count / total_users) * 100
+            print(f"  - Fallback to last item: {fallback_count}/{total_users} ({fallback_ratio:.1f}%)")
+
     
     def _get_most_similar_history_item(
         self,
@@ -671,16 +694,18 @@ class SimilarHistoryItemMentionReward:
     ) -> int:
         """
         히스토리 중 타겟과 가장 유사한 아이템 찾기 (캐시에서 가져오거나 실시간 계산)
+        유사도가 역치 이하이면 마지막 상호작용 아이템 반환
         
         Args:
             user_id: 사용자 ID
-            target_id: 타겟 아이템 ID
-            history_ids: 히스토리 아이템 ID 리스트
             
         Returns:
-            most_similar_item_id: 가장 유사한 히스토리 아이템 ID
+            selected_item_id: 선택된 히스토리 아이템 ID
+                            (유사도 역치 이상: 가장 유사한 아이템,
+                             유사도 역치 미만: 마지막 상호작용 아이템)
         """        
-        return self.similarity_cache[user_id]
+        selected_item_id, _ = self.similarity_cache[user_id]
+        return selected_item_id
     
     def _get_first_three_words(self, title: str) -> str:
         """
@@ -926,6 +951,11 @@ class LocalEmbeddingRewardFunction:
             infonce_coef: InfoNCE 리워드 계수
             infonce_temperature: InfoNCE temperature 파라미터 (default: 0.07)
             infonce_emb_type: InfoNCE용 임베딩 타입 (None이면 emb_type과 동일)
+            proxy_label_reward: Proxy label 리워드 사용 여부
+                               True이면 타겟과 유사한 상위 proxy_k개 아이템도 부분적으로 정답으로 취급
+                               기존 base_reward에 추가로 더해짐
+            proxy_k: Proxy label로 사용할 유사한 아이템 개수
+            proxy_label_coef: Proxy label 리워드 계수
             max_steps: 최대 학습 스텝 수 (novelty annealing 계산에 사용)
         """
         self.__name__ = "LocalEmbeddingRewardFunction"
@@ -959,6 +989,16 @@ class LocalEmbeddingRewardFunction:
         self.infonce_temperature = args.infonce_temperature
         self.infonce_emb_type = args.infonce_emb_type if args.infonce_emb_type is not None else args.emb_type
         
+        # Proxy label 리워드 파라미터
+        if hasattr(args, "proxy_label_reward"):
+            self.proxy_label_reward = args.proxy_label_reward
+            self.proxy_k = args.proxy_k
+            self.proxy_label_coef = args.proxy_label_coef
+        else:
+            self.proxy_label_reward = False
+            self.proxy_k = 0
+            self.proxy_label_coef = 0
+        
         # Training 관련 파라미터
         self.max_steps = args.max_steps
         
@@ -988,6 +1028,12 @@ class LocalEmbeddingRewardFunction:
             print(f"  - InfoNCE temperature: {self.infonce_temperature}")
             print(f"  - InfoNCE embedding type: {self.infonce_emb_type}")
             print(f"  - Contrastive learning: maximize target similarity, minimize negative similarity")
+        if self.proxy_label_reward:
+            print(f"  - Proxy label reward: ENABLED")
+            print(f"  - Proxy K: {self.proxy_k}")
+            print(f"  - Proxy label coefficient: {self.proxy_label_coef}")
+            print(f"  - Use top-{self.proxy_k} similar items as soft labels with similarity-weighted NDCG")
+            print(f"  - Final reward = base_reward + proxy_label_coef * proxy_label_ndcg")
         
         # 임베딩 모델 로드
         print(f"🤖 Loading embedding model: {args.emb_model_name}")
@@ -1030,6 +1076,24 @@ class LocalEmbeddingRewardFunction:
             # 같은 임베딩 사용
             self.infonce_item_embeddings = self.item_embeddings if self.infonce_reward else None
         
+        # Proxy label을 위한 아이템 간 유사도 로드 또는 계산
+        if self.proxy_label_reward:
+            # 저장된 proxy labels 파일 확인
+            proxy_labels_file = f"data_emb/{self.data_name}_proxy_labels_k100_{args.emb_type}_{emb_model_name_dir}.json"
+            proxy_labels_path = Path(proxy_labels_file)
+            
+            if proxy_labels_path.exists():
+                print(f"📦 Loading pre-computed proxy labels from: {proxy_labels_file}")
+                self.item_proxy_labels = self._load_proxy_labels(proxy_labels_path)
+                print(f"✓ Loaded proxy labels for {len(self.item_proxy_labels)} items")
+            else:
+                print(f"⚠️  Pre-computed proxy labels not found: {proxy_labels_file}")
+                print(f"   Computing proxy labels on-the-fly (this may take time)...")
+                exit()
+
+        else:
+            self.item_proxy_labels = None
+        
         # Target embeddings 준비 (target_emb_reward 사용 시)
         if self.target_emb_reward:
             self.target_embeddings = self._prepare_target_embeddings(uid_2_target)
@@ -1047,10 +1111,37 @@ class LocalEmbeddingRewardFunction:
             self.item_popularity_weights = None
 
     def _prepare_candidate_tensor(self, total_user_count: int, uid_2_target: Dict[int, int], neg_pool: Dict[int, List[int]]) -> torch.Tensor:
-        candidate_tensor = torch.zeros(total_user_count+1, self.k, dtype=torch.long)
+        candidate_tensor = torch.zeros(total_user_count+1, len(list(neg_pool.values())[0])+1, dtype=torch.long)
         for uid, target_id in uid_2_target.items():
             candidate_tensor[uid] = torch.tensor([target_id] + neg_pool[uid], dtype=torch.long)
         return candidate_tensor
+    
+    def _load_proxy_labels(self, file_path: Path) -> Dict[int, Tuple[torch.Tensor, torch.Tensor]]:
+        """
+        저장된 proxy labels를 로드
+        
+        Args:
+            file_path: proxy labels JSON 파일 경로
+            
+        Returns:
+            item_proxy_labels: Dict[item_id, (proxy_item_ids, proxy_similarities)]
+        """
+        with open(file_path, 'r') as f:
+            proxy_labels_json = json.load(f)
+        
+        # JSON에서 로드한 데이터를 텐서로 변환
+        item_proxy_labels = {}
+        for item_id_str, proxy_list in proxy_labels_json.items():
+            proxy_list = proxy_list[:self.proxy_k]
+            item_id = int(item_id_str)
+            
+            # List[Tuple[item_id, similarity]]를 두 개의 텐서로 분리
+            proxy_ids = torch.tensor([p[0] for p in proxy_list], dtype=torch.long, device=self.device)
+            proxy_sims = torch.tensor([p[1] for p in proxy_list], dtype=torch.float32, device=self.device)
+            
+            item_proxy_labels[item_id] = (proxy_ids, proxy_sims)
+        
+        return item_proxy_labels
     
     def _prepare_target_embeddings(self, uid_2_target: Dict[int, int]) -> torch.Tensor:
         """
@@ -1188,14 +1279,17 @@ class LocalEmbeddingRewardFunction:
         self,
         query_embeddings: torch.Tensor,
         user_ids: torch.Tensor,
-    ) -> torch.Tensor:
+        return_scores: bool = False,
+    ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
         """
         Compute similarity scores between query embeddings and candidate set
         Args:
             query_embeddings: [batch_size, emb_dim] query embeddings
             user_ids: [batch_size] user ids
+            return_scores: if True, return (ranks, scores), otherwise return (ranks, None)
         Returns:
             ranks: [batch_size] ranks of target items
+            scores: [batch_size, num_candidates] similarity scores (only if return_scores=True)
         """
         if self.use_full_item_pool:
             # 전체 아이템 풀에 대해 유사도 계산
@@ -1221,7 +1315,134 @@ class LocalEmbeddingRewardFunction:
             target_scores = scores[:, 0].unsqueeze(1)
             ranks = (scores > target_scores).sum(dim=1) + 1
         
-        return ranks
+        if return_scores:
+            return ranks, scores
+        else:
+            return ranks, None
+    
+    def _compute_proxy_label_ndcg(
+        self,
+        query_embeddings: torch.Tensor,
+        user_ids: torch.Tensor,
+        predicted_scores: torch.Tensor,
+    ) -> torch.Tensor:
+        """
+        Proxy label 기반 NDCG 계산
+        미리 계산된 아이템 간 유사도를 활용하여 타겟의 proxy labels을 soft label로 사용
+        
+        Args:
+            query_embeddings: [batch_size, emb_dim] 쿼리 임베딩
+            user_ids: [batch_size] 사용자 ID
+            predicted_scores: [batch_size, num_items] 또는 [batch_size, num_candidates] 예측 점수
+            
+        Returns:
+            ndcg_rewards: [batch_size] Proxy label 기반 NDCG 리워드
+        """
+        batch_size = len(user_ids)
+        ndcg_rewards = torch.zeros(batch_size, device=self.device)
+        
+        # 타겟 아이템 ID 가져오기
+        target_item_ids = torch.tensor(
+            [self.uid_2_target[uid] for uid in user_ids],
+            device=self.device
+        )  # [batch_size]
+        
+        if self.use_full_item_pool:
+            # 전체 아이템 풀 사용
+            num_items = len(self.item_embeddings)
+            
+            for i in range(batch_size):
+                target_id = target_item_ids[i].item()
+                
+                # # 타겟 아이템의 미리 계산된 proxy labels 가져오기
+                # if target_id not in self.item_proxy_labels:
+                #     # Proxy labels가 없으면 타겟만 1.0
+                #     proxy_ids = torch.tensor([], dtype=torch.long, device=self.device)
+                #     proxy_sims = torch.tensor([], dtype=torch.float32, device=self.device)
+                # else:
+                proxy_ids, proxy_sims = self.item_proxy_labels[target_id]
+                
+                # Relevance scores 생성: 타겟 자신은 1.0, proxy는 유사도 비례
+                relevance_scores = torch.zeros(num_items, device=self.device)
+                relevance_scores[target_id] = 1.0  # 타겟 자신
+                relevance_scores[proxy_ids] = proxy_sims  # Proxy labels
+                
+                # 예측 점수 기준으로 Top-K 추출
+                pred_scores = predicted_scores[i]  # [num_items]
+                top_k_pred_scores, top_k_pred_indices = torch.topk(pred_scores, k=min(self.k, len(pred_scores)))
+                
+                # Top-K 예측 결과에서 relevance 추출
+                predicted_relevance = relevance_scores[top_k_pred_indices]  # [k]
+                
+                # DCG 계산
+                dcg = calculate_dcg(predicted_relevance.unsqueeze(0), k=self.k)[0]
+                
+                # IDCG 계산 (이상적인 경우: relevance가 높은 순서대로 정렬)
+                ideal_relevance, _ = torch.sort(relevance_scores, descending=True)
+                ideal_relevance = ideal_relevance[:self.k]
+                idcg = calculate_dcg(ideal_relevance.unsqueeze(0), k=self.k)[0]
+                
+                # NDCG 계산
+                if idcg > 0:
+                    ndcg_rewards[i] = dcg / (idcg + 1e-10)
+                else:
+                    ndcg_rewards[i] = 0.0
+        else:
+            # Candidate set 기반 계산
+            for i in range(batch_size):
+                target_id = target_item_ids[i].item()
+                
+                # Candidate set 가져오기
+                batch_candidate_tensor = self.candidate_tensor[user_ids[i]]  # [num_candidates]
+                num_candidates = len(batch_candidate_tensor)
+                
+                # 타겟 아이템의 미리 계산된 proxy labels 가져오기
+                if target_id not in self.item_proxy_labels:
+                    # Proxy labels가 없으면 타겟만 1.0
+                    proxy_ids = torch.tensor([], dtype=torch.long, device=self.device)
+                    proxy_sims = torch.tensor([], dtype=torch.float32, device=self.device)
+                else:
+                    proxy_ids, proxy_sims = self.item_proxy_labels[target_id]
+                
+                # Candidate set 내에서 relevance scores 생성
+                relevance_scores = torch.zeros(num_candidates, device=self.device)
+                
+                # 타겟 아이템이 candidate set에 있는 위치 찾기 (보통 index 0)
+                target_mask = batch_candidate_tensor == target_id
+                if target_mask.any():
+                    target_idx_in_candidates = target_mask.nonzero(as_tuple=True)[0][0]
+                    relevance_scores[target_idx_in_candidates] = 1.0
+                
+                # Proxy labels도 candidate set에 있는지 확인하고 relevance 할당
+                if len(proxy_ids) > 0:
+                    for proxy_id, proxy_sim in zip(proxy_ids, proxy_sims):
+                        proxy_mask = batch_candidate_tensor == proxy_id.item()
+                        if proxy_mask.any():
+                            proxy_idx_in_candidates = proxy_mask.nonzero(as_tuple=True)[0][0]
+                            relevance_scores[proxy_idx_in_candidates] = proxy_sim.item()
+                
+                # 예측 점수 기준으로 Top-K 추출
+                pred_scores = predicted_scores[i]  # [num_candidates]
+                top_k_pred_scores, top_k_pred_indices = torch.topk(pred_scores, k=min(self.k, len(pred_scores)))
+                
+                # Top-K 예측 결과에서 relevance 추출
+                predicted_relevance = relevance_scores[top_k_pred_indices]  # [k]
+                
+                # DCG 계산
+                dcg = calculate_dcg(predicted_relevance.unsqueeze(0), k=self.k)[0]
+                
+                # IDCG 계산
+                ideal_relevance, _ = torch.sort(relevance_scores, descending=True)
+                ideal_relevance = ideal_relevance[:self.k]
+                idcg = calculate_dcg(ideal_relevance.unsqueeze(0), k=self.k)[0]
+                
+                # NDCG 계산
+                if idcg > 0:
+                    ndcg_rewards[i] = dcg / (idcg + 1e-10)
+                else:
+                    ndcg_rewards[i] = 0.0
+        
+        return ndcg_rewards
     
     def _compute_target_embedding_reward(
         self,
@@ -1276,20 +1497,19 @@ class LocalEmbeddingRewardFunction:
             
             # 타겟을 제외한 negative들의 평균 유사도
             negative_mean_similarities = all_similarities[mask].view(batch_size, -1).mean(dim=1)
+            rewards = target_similarities - torch.clamp(negative_mean_similarities, min=0.0)
         else:
-            # 3. Negative 임베딩들과의 평균 유사도 계산 (기존 로직)
-            batch_candidate_tensor = self.candidate_tensor[user_ids]  # [batch_size, k]
-            negative_ids = batch_candidate_tensor[:, 1:]  # [batch_size, k-1] (첫 번째는 target 제외)
+            # # 3. Negative 임베딩들과의 평균 유사도 계산 (기존 로직)
+            # batch_candidate_tensor = self.candidate_tensor[user_ids]  # [batch_size, k]
+            # negative_ids = batch_candidate_tensor[:, 1:]  # [batch_size, k-1] (첫 번째는 target 제외)
             
-            # 전체 타겟 임베딩과의 유사도 계산
-            all_similarities = torch.mm(query_embeddings, self.target_embeddings.T)  # [batch_size, num_users]
+            # # 전체 타겟 임베딩과의 유사도 계산
+            # all_similarities = torch.mm(query_embeddings, self.target_embeddings.T)  # [batch_size, num_users]
             
-            # 평균 유사도 계산
-            negative_mean_similarities = all_similarities.mean(dim=1)  # [batch_size]
-        
-        # 4. 상대적 리워드 계산: 타겟과의 유사도가 negative 평균보다 얼마나 높은지
-        rewards = target_similarities - negative_mean_similarities
-        
+            # # 평균 유사도 계산
+            # negative_mean_similarities = all_similarities.mean(dim=1)  # [batch_size]
+            rewards = target_similarities
+                
         return rewards
     
     def _compute_infonce_reward(
@@ -1394,6 +1614,10 @@ class LocalEmbeddingRewardFunction:
         Returns:
             rewards: [batch_size] 리워드 값 
             
+            If proxy_label_reward=True:
+                rewards = base_reward + proxy_label_coef × proxy_label_ndcg
+                (타겟과 유사한 아이템들도 부분적으로 정답으로 취급)
+            
             If novelty_reward=True and novelty_annealing=False:
                 rewards = novelty_coef × (NDCG × popularity_weight)
                 (인기 없는 아이템을 높은 rank로 예측할수록 높은 보상)
@@ -1409,8 +1633,9 @@ class LocalEmbeddingRewardFunction:
         # 생성된 텍스트를 임베딩으로 변환 (한 번만 수행)
         query_embeddings = self._encode_texts(generated_texts)
         
+        # 기존 rank 기반 리워드 계산
         # rank 계산 (target + negatives)
-        ranks = self._compute_similarity_scores(query_embeddings, user_ids)
+        ranks, _ = self._compute_similarity_scores(query_embeddings, user_ids, return_scores=False)
         
         # 기본 리워드 타입에 따라 계산
         if self.reward_type == "ndcg":
@@ -1425,6 +1650,16 @@ class LocalEmbeddingRewardFunction:
             base_rewards = 0.7 * ndcg + 0.3 * hit
         else:
             raise ValueError(f"Unknown reward_type: {self.reward_type}")
+        # Proxy label reward 사용 여부에 따라 분기
+        if self.proxy_label_reward:
+            # Proxy label 리워드 사용 시: 기존 base_reward + proxy_label_reward
+            # 예측 점수도 함께 계산 필요
+            _, predicted_scores = self._compute_similarity_scores(query_embeddings, user_ids, return_scores=True)
+            # 2. Proxy label NDCG 계산
+            proxy_label_rewards = self._compute_proxy_label_ndcg(query_embeddings, user_ids, predicted_scores)
+            
+            # 3. 두 리워드를 합산
+            base_rewards = base_rewards + self.proxy_label_coef * proxy_label_rewards
         
         # Novelty reward 사용 여부에 따라 분기
         if self.novelty_reward and self.item_popularity_weights is not None:

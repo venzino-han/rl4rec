@@ -15,7 +15,7 @@ from typing import List, Dict, Optional, Tuple
 import torch
 from torch.utils.data import Dataset, DataLoader
 
-from utils.prompt_templates import PROMPT_TEMPLATES
+from utils.prompt_templates import PROMPT_TEMPLATES, PROMPT_TEMPLATES_YELP
 
 class PromptGenerator:
     """
@@ -91,9 +91,16 @@ class PromptGenerator:
         self.use_sasrec = use_sasrec
         self.sasrec_top_k = sasrec_top_k
         
+        # 데이터셋에 따라 적절한 프롬프트 템플릿 선택
+        if data_name == 'yelp':
+            self.templates = PROMPT_TEMPLATES_YELP
+            print(f"✓ Using PROMPT_TEMPLATES_YELP for data_name='{data_name}'")
+        else:
+            self.templates = PROMPT_TEMPLATES
+        
         # 프롬프트 타입 설정
-        if prompt_type not in PROMPT_TEMPLATES:
-            print(f"⚠️  Unknown prompt type '{prompt_type}'. Available types: {list(PROMPT_TEMPLATES.keys())}")
+        if prompt_type not in self.templates:
+            print(f"⚠️  Unknown prompt type '{prompt_type}'. Available types: {list(self.templates.keys())}")
             print(f"   Using default 'recent_preference' type.")
             self.prompt_type = 'recent_preference'
         else:
@@ -252,7 +259,7 @@ class PromptGenerator:
             history_text += f"\n\n`{last_item_title}` is the most recently purchased item."
         
         # 선택된 프롬프트 템플릿 가져오기
-        template = PROMPT_TEMPLATES[self.prompt_type]
+        template = self.templates[self.prompt_type]
         
         # 타겟 아이템 날짜 추가
         target_date = ""
@@ -267,7 +274,7 @@ class PromptGenerator:
         sasrec_section = ""
         if self.use_sasrec and sasrec_items and len(sasrec_items) > 0:
             # 프롬프트 템플릿에서 sasrec_section이 있는지 확인
-            template = PROMPT_TEMPLATES[self.prompt_type]
+            template = self.templates[self.prompt_type]
             if 'sasrec_section' in template:
                 sasrec_section = template['sasrec_section']
                 

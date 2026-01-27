@@ -19,15 +19,16 @@
 
 # # Python 경로 설정
 # export PYTHONPATH="${PYTHONPATH}:$(pwd)/src"
-max_steps=5000
-dataset_names=(beauty toys)
-device=6
-PROMPT_TYPE="seq_rec_recent"
+max_steps=1000
+dataset_names=(beauty toys sports yelp)
+device=7
+PROMPT_TYPE="seq_rec"
 # 학습 실행
 for dataset_name in ${dataset_names[@]}; do
 echo "Training ${dataset_name}..."
-
-RUN_NAME="r1_rec_${dataset_name}_${PROMPT_TYPE}"
+for lr in 5e-6; do
+for temp in 0.3 0.6; do
+RUN_NAME="dr_grpo_${dataset_name}_seq_rec_factual_reasoning_emb_0.05_1000_temp${temp}_lr${lr}"
 CHECKPOINT_DIR="checkpoints/$RUN_NAME"
 FINAL_CHECKPOINT_DIR="$CHECKPOINT_DIR/checkpoint-$max_steps"
 
@@ -38,21 +39,26 @@ CUDA_VISIBLE_DEVICES=$device python3 src/grpo_train.py \
     --reward_type "ndcg" \
     --k 100 \
     --prompt_type $PROMPT_TYPE \
+    --loss_type dr_grpo \
+    --importance_sampling_level sequence \
+    --use_brand \
+    --use_category \
     --emphasize_recent_item \
-    --include_target_date \
     --use_local_embedding \
     --emb_model_name "mixedbread-ai/mxbai-embed-large-v1" \
     --emb_type item_preference_1024_gemma-3-4b-it \
+    --target_emb_reward \
+    --target_emb_file "user_preference_reasoning_1024_user_preference_${dataset_name}_gemma-3-12b-it_mxbai-embed-large-v1_train_pred_emb.pt" \
+    --target_emb_coef 0.05 \
     --max_new_tokens 128 \
     --batch_size 32 \
-    --learning_rate 1e-6 \
+    --learning_rate $lr \
+    --train_temperature $temp \
     --num_epochs 1 \
     --max_steps $max_steps \
-    --use_brand \
-    --use_category \
     --checkpoint_dir $CHECKPOINT_DIR \
     --final_checkpoint_dir $FINAL_CHECKPOINT_DIR \
-    --log_interval 100 \
+    --log_interval 20 \
     --eval_interval 5000 \
     --save_interval 1000 \
     --num_negs 99 \
@@ -68,14 +74,16 @@ CUDA_VISIBLE_DEVICES=$device python3 src/grpo_eval.py \
     --emb_type item_preference_1024_gemma-3-4b-it \
     --use_local_embedding \
     --prompt_type $PROMPT_TYPE \
-    --emphasize_recent_item \
-    --include_target_date \
-    --max_new_tokens 512 \
     --use_brand \
     --use_category \
+    --emphasize_recent_item \
+    --max_new_tokens 512 \
     --final_checkpoint_dir $FINAL_CHECKPOINT_DIR \
     --device "cuda" \
     "$@"
+
+done
+done
 done
 
 echo "✅ Training completed!"

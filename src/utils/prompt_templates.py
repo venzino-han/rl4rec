@@ -7,7 +7,33 @@ PROMPT_TEMPLATES = {
                 'Below is the user purchase history:\n',
     'tail': 'Based on this user\'s purchase history, generate relevant query terms that can be used to search for these potential products.',
     },
-    
+
+    # 'seq_rec': {
+    # 'head': 'You are an intelligent shopping assistant that helps predict what users may want to purchase next. Below is a list of items a user has purchased recently.\n' +\
+    #             'Your task is to infer one or multiple kinds of products they may want to buy next, and generate relevant query terms that can be used to search for these potential products.\n' +\
+    #             'Below is the user purchase history:\n',
+    # 'tail': 'Based on this user\'s purchase history, generate relevant query terms that can be used to search for these potential products.\n' +\
+    #         'The response should be start with "Considering the user\'s recent purchase of [Item Name], ..."',
+    # },
+    'seq_rec_new': {
+    'head': 'You are an intelligent shopping assistant that helps predict what users may want to purchase next. Below is a list of items a user has purchased recently.\n' +
+            'Your task is to infer one or multiple kinds of products they may want to buy next, and generate relevant query terms that can be used to search for these potential products.\n' +
+            'Below is the user purchase history:\n',
+    'tail': 'Based on this user\'s purchase history, generate multiple relevant query terms that can be used to search for these potential products.\n' +
+            'Each query must strictly follow the format: "[Item Name]: [Item Attributes, Related User Preferences]".\n' +
+            'The response should start with "Considering the user\'s recent purchase of [Item Name], ..."',
+    },
+
+    'seq_rec_new_2': {
+    'head': 'You are an intelligent shopping assistant that helps predict what users may want to purchase next. Below is a list of items a user has purchased recently.\n' +
+            'Your task is to infer one or multiple kinds of products they may want to buy next, and generate relevant query terms that can be used to search for these potential products.\n' +
+            'Below is the user purchase history:\n',
+    'tail': 'Based on this user\'s purchase history, select one representative item from the history that highlights the user\'s taste.\n' +
+            'Start the response strictly with the format: "[History Item Name]: [Related User Preference]", followed by a brief explanation connecting it to the recommendations.\n' +
+            'Then, generate multiple relevant query terms for the potential next products.\n' +
+            'Each query must strictly follow the format: "[Target Item Name]: [Item Attributes, Related User Preferences]".',
+    },
+
     'seq_rec_date': {
     'head': '### Role\n' +\
             'You are an intelligent shopping assistant that helps predict what users may want to purchase next. Below is a list of items a user has purchased recently.\n' +\
@@ -99,4 +125,37 @@ PROMPT_TEMPLATES = {
                 'You may refer to the SASRec recommendations above, but they are not always correct, so use your own judgment based on the purchase history.',
     },
 
+}
+
+
+
+PROMPT_TEMPLATES_YELP = {
+    # 1. Basic Sequence Recommendation for Yelp
+    'seq_rec': {
+        'head': 'You are an intelligent local guide that helps predict what businesses users may want to visit next. Below is a list of places a user has visited recently.\n' +
+                'Your task is to infer one or multiple kinds of businesses (e.g., restaurants, services) they may want to visit next, and generate relevant query terms that can be used to search for these potential places.\n' +
+                'Below is the user visit history:\n',
+        'tail': 'Based on this user\'s visit history, generate relevant query terms that can be used to search for these potential businesses.',
+    },
+
+    # 2. "Considering..." start format
+    'seq_rec_new': {
+        'head': 'You are an intelligent local guide that helps predict what businesses users may want to visit next. Below is a list of places a user has visited recently.\n' +
+                'Your task is to infer one or multiple kinds of businesses they may want to visit next, and generate relevant query terms that can be used to search for these potential places.\n' +
+                'Below is the user visit history:\n',
+        'tail': 'Based on this user\'s visit history, generate multiple relevant query terms that can be used to search for these potential businesses.\n' +
+                'Each query must strictly follow the format: "[Business Category]: [Business Attributes, Related User Preferences]".\n' +
+                'The response should start with "Considering the user\'s recent visit to [Business Name], ..."',
+    },
+
+    # 3. "[History Item] -> Explanation -> Queries" format (Most Structured)
+    'seq_rec_new_2': {
+        'head': 'You are an intelligent local guide that helps predict what businesses users may want to visit next. Below is a list of places a user has visited recently.\n' +
+                'Your task is to infer one or multiple kinds of businesses they may want to visit next, and generate relevant query terms that can be used to search for these potential places.\n' +
+                'Below is the user visit history:\n',
+        'tail': 'Based on this user\'s visit history, select one representative place from the history that highlights the user\'s taste.\n' +
+                'Start the response strictly with the format: "[Visited Business Name]: [Related User Preference]", followed by a brief explanation connecting it to the recommendations.\n' +
+                'Then, generate multiple relevant query terms for the potential next businesses.\n' +
+                'Each query must strictly follow the format: "[Target Business Category]: [Business Attributes, Related User Preferences]".',
+    },
 }

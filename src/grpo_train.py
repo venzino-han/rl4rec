@@ -114,16 +114,7 @@ class GRPOTrainerWrapper:
     
     def __init__(self, args):
         self.args = args
-        
-        # wandb 초기화 및 args 전달
-        if args.report_to == "wandb":
-            print(f"📊 Initializing Weights & Biases...")
-            wandb.init(
-                project="rl4rec",
-                name=args.run_name,
-                config=vars(args),  # args의 모든 요소를 wandb config로 전달
-            )
-            print(f"✓ Wandb initialized with all args")
+
         
         # Ray 초기화 (use_local_embedding이 False인 경우에만)
         if not args.use_local_embedding:
@@ -157,6 +148,16 @@ class GRPOTrainerWrapper:
         ) = create_dataloaders(args, tokenizer=self.tokenizer)
         
         if args.num_epochs > 0:
+                    
+            # wandb 초기화 및 args 전달
+            if args.report_to == "wandb":
+                print(f"📊 Initializing Weights & Biases...")
+                wandb.init(
+                    project="rl4rec",
+                    name=args.run_name,
+                    config=vars(args),  # args의 모든 요소를 wandb config로 전달
+                )
+                print(f"✓ Wandb initialized with all args")
 
             # GRPO Config
             grpo_config = GRPOConfig(
@@ -188,7 +189,7 @@ class GRPOTrainerWrapper:
 
                 # Generation
                 max_completion_length=args.max_new_tokens,
-                repetition_penalty=1.1,
+                repetition_penalty=1.0,
                 top_p=0.95,
 
                 # vLLM
@@ -197,6 +198,10 @@ class GRPOTrainerWrapper:
                 vllm_gpu_memory_utilization=args.train_vllm_gpu_memory_utilization,
                 vllm_max_model_length=args.max_length+args.max_new_tokens,
                 vllm_enable_sleep_mode=False,
+                
+                vllm_importance_sampling_correction=True,
+                vllm_importance_sampling_mode= "sequence_mask" if args.importance_sampling_level == "sequence" else "token_mask",
+                vllm_importance_sampling_cap=3.0,
 
                 include_for_metrics=["reward", "entropy", "grad_norm", "epoch"]
             )
@@ -475,6 +480,15 @@ def parse_args():
     parser.add_argument("--infonce_emb_type", type=str, default=None,
                         help="Embedding type for InfoNCE (e.g., 'title_emb'). "
                              "If None, uses the same embedding as emb_type.")
+    
+    # Proxy Label Reward
+    parser.add_argument("--proxy_label_reward", action="store_true",
+                        help="Use proxy label reward: treats items similar to target as soft labels. "
+                             "Rewards predicting target-similar items proportional to their similarity.")
+    parser.add_argument("--proxy_k", type=int, default=10,
+                        help="Number of proxy items (similar items) to use as soft labels")
+    parser.add_argument("--proxy_label_coef", type=float, default=1.0,
+                        help="Proxy label reward coefficient (weight for this reward component)")
     
     # Local Embedding-based Reward (alternative to RetrievalService)
     parser.add_argument("--use_local_embedding", action="store_true", 

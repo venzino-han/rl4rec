@@ -8,9 +8,9 @@ PROMPT_TYPE="seq_rec"
 # 학습 실행
 for dataset_name in ${dataset_names[@]}; do
     echo "Training ${dataset_name}..."
-for lr in 5e-6 2e-6 1e-6; do
-
-    RUN_NAME="r1_rec_${dataset_name}_pref_128_1000_temp0.1_60d_lr${lr}"
+for lr in 1e-5 5e-6 2e-6; do
+for temp in 0.1 0.3 0.6; do
+    RUN_NAME="dr_grpo_${dataset_name}_pref_128_1000_temp0.1_60d_lr${lr}"
     CHECKPOINT_DIR="checkpoints/$RUN_NAME"
     FINAL_CHECKPOINT_DIR="$CHECKPOINT_DIR/checkpoint-$max_steps"
 
@@ -19,7 +19,9 @@ for lr in 5e-6 2e-6 1e-6; do
         --model_name "google/gemma-3-1b-it" \
         --data_name $dataset_name \
         --reward_type "ndcg" \
-        --k 1000 \
+        --k 100 \
+        --loss_type "dr_grpo" \
+        --importance_sampling_level sequence \
         --prompt_type $PROMPT_TYPE \
         --emphasize_recent_item \
         --use_brand \
@@ -32,7 +34,7 @@ for lr in 5e-6 2e-6 1e-6; do
         --num_epochs 1 \
         --batch_size 32 \
         --num_sample_generations 4 \
-        --train_temperature 0.1 \
+        --train_temperature $temp \
         --learning_rate $lr \
         --max_steps $max_steps \
         --checkpoint_dir $CHECKPOINT_DIR \
@@ -59,6 +61,7 @@ for lr in 5e-6 2e-6 1e-6; do
         --final_checkpoint_dir $FINAL_CHECKPOINT_DIR \
         --device "cuda" \
         "$@"
+done
 done
 done
 
