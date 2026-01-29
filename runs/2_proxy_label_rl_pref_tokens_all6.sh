@@ -2,8 +2,10 @@
 
 max_steps=1000
 dataset_names=(beauty toys sports yelp)
-device=1
+device=6
 PROMPT_TYPE="seq_rec_new"
+
+proxy_label_coef=0.5
 
 TRACKER="python3 utils/device_tracker.py"
 
@@ -11,7 +13,7 @@ for dataset_name in ${dataset_names[@]}; do
     echo "Training ${dataset_name}..."
 for temp in 0.6 ; do
 for loss_type in dr_grpo; do
-    RUN_NAME="${dataset_name}_${PROMPT_TYPE}_proxy_label_0.1_${loss_type}_token_pref_k1000_128_1000_temp${temp}_lr2e-6"
+    RUN_NAME="${dataset_name}_${PROMPT_TYPE}_proxy_label_30_${proxy_label_coef}_seed62_${loss_type}_token_pref_k1000_128_1000_temp${temp}_lr2e-6"
     CHECKPOINT_DIR="checkpoints/$RUN_NAME"
     FINAL_CHECKPOINT_DIR="$CHECKPOINT_DIR/checkpoint-$max_steps"
 
@@ -23,6 +25,7 @@ for loss_type in dr_grpo; do
         --data_name $dataset_name \
         --reward_type "ndcg" \
         --k 1000 \
+        --seed 62 \
         --loss_type $loss_type \
         --use_local_embedding \
         --prompt_type $PROMPT_TYPE \
@@ -32,8 +35,8 @@ for loss_type in dr_grpo; do
         --emb_model_name "mixedbread-ai/mxbai-embed-large-v1" \
         --emb_type item_preference_1024_gemma-3-4b-it \
         --proxy_label_reward \
-        --proxy_k 100 \
-        --proxy_label_coef 0.1 \
+        --proxy_k 30 \
+        --proxy_label_coef $proxy_label_coef \
         --max_new_tokens 128 \
         --num_epochs 1 \
         --batch_size 32 \

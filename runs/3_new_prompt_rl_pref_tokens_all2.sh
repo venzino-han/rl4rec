@@ -9,9 +9,10 @@ TRACKER="python3 utils/device_tracker.py"
 
 for dataset_name in ${dataset_names[@]}; do
     echo "Training ${dataset_name}..."
-for temp in 0.1 ; do
+for temp in 0.6 ; do
 for loss_type in dr_grpo; do
-    RUN_NAME="${dataset_name}_new_prompt_${loss_type}_token_pref_k1000_128_1000_temp${temp}_lr2e-6"
+for seed in 22 42 62; do
+    RUN_NAME="${dataset_name}_baseline_${PROMPT_TYPE}_metaonly_${loss_type}_seed${seed}_token_pref_k1000_128_1000_temp${temp}_lr2e-6"
     CHECKPOINT_DIR="checkpoints/$RUN_NAME"
     FINAL_CHECKPOINT_DIR="$CHECKPOINT_DIR/checkpoint-$max_steps"
 
@@ -31,8 +32,9 @@ for loss_type in dr_grpo; do
         --use_category \
         --emphasize_recent_item \
         --emb_model_name "mixedbread-ai/mxbai-embed-large-v1" \
-        --emb_type item_preference_1024_gemma-3-4b-it \
+        --emb_type item_meta_only \
         --max_new_tokens 128 \
+        --seed $seed \
         --num_epochs 1 \
         --batch_size 32 \
         --learning_rate 2e-6 \
@@ -52,7 +54,7 @@ for loss_type in dr_grpo; do
         --model_name "google/gemma-3-1b-it" \
         --data_name $dataset_name \
         --emb_model_name "mixedbread-ai/mxbai-embed-large-v1" \
-        --emb_type item_preference_1024_gemma-3-4b-it \
+        --emb_type item_meta_only \
         --prompt_type $PROMPT_TYPE \
         --use_local_embedding \
         --emphasize_recent_item \
@@ -64,6 +66,7 @@ for loss_type in dr_grpo; do
         "$@"
 
     $TRACKER free $device
+done
 done
 done
 done

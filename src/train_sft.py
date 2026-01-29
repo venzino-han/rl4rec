@@ -354,9 +354,9 @@ def parse_arguments():
     # Token settings
     parser.add_argument("--max_length", type=int, default=1024*2,
                         help="Maximum sequence length for SFT")
-    parser.add_argument("--max_new_tokens", type=int, default=512,
+    parser.add_argument("--max_new_tokens", type=int, default=128,
                         help="Maximum new tokens for generation")
-    parser.add_argument("--eval_max_tokens", type=int, default=512,
+    parser.add_argument("--eval_max_tokens", type=int, default=128,
                         help="Maximum new tokens for generation")
 
     # Target settings
@@ -405,7 +405,7 @@ def parse_arguments():
                         help="Checkpoint directory")
     parser.add_argument("--final_checkpoint_dir", type=str, default="checkpoints/sft/checkpoint-5000",
                         help="Final checkpoint directory for evaluation")
-    parser.add_argument("--logging_steps", type=int, default=1000)
+    parser.add_argument("--logging_steps", type=int, default=100)
     parser.add_argument("--save_steps", type=int, default=500)
     parser.add_argument("--eval_steps", type=int, default=5000)
     parser.add_argument("--save_total_limit", type=int, default=3)

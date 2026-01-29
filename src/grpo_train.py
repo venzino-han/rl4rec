@@ -37,8 +37,7 @@ from utils.reward_function import (
     calculate_hit_rate,
     LocalEmbeddingRewardFunction,
     SimilarHistoryItemMentionReward,
-    BrandMentionReward,
-    CategoryMentionReward,
+    MetadataMentionReward,
 )
 from utils.dataset import create_dataloaders
 from evaluator import RecommendationEvaluator
@@ -73,6 +72,9 @@ class GRPOTrainerRecReward(GRPOTrainer):
         # This allows for dynamic reward shaping based on training progress.
         reward_kwargs["trainer_state"] = self.state
 
+        # Reward breakdown 수집을 위한 딕셔너리
+        reward_breakdowns = {}
+
         for i, (reward_func, reward_processing_class, reward_func_name) in enumerate(
             zip(self.reward_funcs, self.reward_processing_classes, self.reward_func_names, strict=True)
         ):
@@ -88,6 +90,14 @@ class GRPOTrainerRecReward(GRPOTrainer):
                 output_reward_func = [reward if reward is not None else torch.nan for reward in output_reward_func]
 
                 rewards_per_func[:, i] = torch.tensor(output_reward_func, dtype=torch.float32, device=device)
+                
+                # Reward breakdown 정보 수집 (LocalEmbeddingRewardFunction인 경우)
+                if reward_func_name == "LocalEmbeddingRewardFunction":
+                    breakdown = reward_func.get_reward_breakdown()
+                    for key, value in breakdown.items():
+                        if key not in reward_breakdowns:
+                            reward_breakdowns[key] = []
+                        reward_breakdowns[key].append(value)
 
         # If all reward functions return None for a given row, issue a detailed warning
         if torch.isnan(rewards_per_func).all(dim=1).any():
@@ -105,7 +115,26 @@ class GRPOTrainerRecReward(GRPOTrainer):
         # Gather the reward per function: this part is crucial, because the rewards are normalized per group and the
         # completions may be distributed across processes
         rewards_per_func = gather(rewards_per_func)
+        
+        # --- 변경된 부분: 직접 로깅 대신 인스턴스 변수에 저장 ---
+        # 메인 프로세스에서만 계산하여 저장
+        if reward_breakdowns and self.accelerator.is_main_process:
+            self._store_reward_breakdown(reward_breakdowns)
+        
         return rewards_per_func
+    
+    def _store_reward_breakdown(self, reward_breakdowns):
+        """
+        계산된 Breakdown 통계치를 self._stored_metrics에 저장합니다.
+        실제 로깅은 log() 메서드가 호출될 때 수행됩니다.
+        """
+        mode = "train" if self.model.training else "eval"
+        for key, values_list in reward_breakdowns.items():
+            # 여러 reward function에서 수집된 값들을 합침
+            all_values = torch.cat(values_list) if len(values_list) > 0 else torch.tensor([])
+            if len(all_values) > 0:
+                self._metrics[mode][f"rewards/{key}"] = all_values.tolist()
+                # self._metrics[mode][f"rewards/{key}_std"] = all_values
 
 class GRPOTrainerWrapper:
     """
@@ -177,6 +206,7 @@ class GRPOTrainerWrapper:
                 bf16=args.bf16,
                 report_to=args.report_to if args.report_to != "none" else None,
                 run_name=args.run_name,
+                beta=args.reference_model_kld_coef,
                 
                 # Loss type
                 loss_type=args.loss_type,
@@ -268,6 +298,21 @@ class GRPOTrainerWrapper:
                     device=args.device,
                 )
                 reward_funcs.append(category_reward_fn)
+            
+            # 5. Metadata Mention Reward (옵션) - 통합 메타데이터 리워드
+            if args.use_metadata_reward:
+                print(f"  [5] Metadata Mention Reward: +{args.metadata_base_reward} per metadata word, "
+                      f"length penalty={args.metadata_length_penalty}, "
+                      f"history penalty={args.history_penalty_weight}")
+                metadata_reward_fn = MetadataMentionReward(
+                    data_name=args.data_name,
+                    device=args.device,
+                    base_reward=args.metadata_base_reward,
+                    length_penalty_alpha=args.metadata_length_penalty,
+                    min_length=args.metadata_min_length,
+                    history_penalty_weight=args.history_penalty_weight,
+                )
+                reward_funcs.append(metadata_reward_fn)
             
             print(f"  Total reward functions: {len(reward_funcs)}")
             
@@ -411,6 +456,7 @@ def parse_args():
     parser.add_argument("--max_steps", type=int, default=5000)
     parser.add_argument("--bf16", action="store_true", help="Use bfloat16")
     parser.add_argument("--train_temperature", type=float, default=0.1)
+    parser.add_argument("--reference_model_kld_coef", type=float, default=0.0)
     parser.add_argument("--importance_sampling_level", type=str, default="token", choices=["token", "sequence"])
 
     # Reward
@@ -438,6 +484,21 @@ def parse_args():
     parser.add_argument("--use_category_reward", action="store_true",
                         help="Use reward for mentioning target item's category. "
                              "Reward: +0.5 for mentioning any part of the category.")
+    
+    # Metadata Mention Reward (통합 메타데이터 리워드)
+    parser.add_argument("--use_metadata_reward", action="store_true",
+                        help="Use unified metadata mention reward. "
+                             "Rewards mentioning metadata words (brand, category) proportionally, "
+                             "with length penalty and stopword filtering using NLTK.")
+    parser.add_argument("--metadata_base_reward", type=float, default=0.1,
+                        help="Base reward per metadata word mentioned (default: 1.0)")
+    parser.add_argument("--metadata_length_penalty", type=float, default=0.5,
+                        help="Length penalty alpha for metadata reward (0.0-1.0). "
+                             "Higher values penalize longer texts more (default: 0.5)")
+    parser.add_argument("--metadata_min_length", type=int, default=16,
+                        help="Minimum text length (in words) before length penalty applies (default: 10)")
+    parser.add_argument("--history_penalty_weight", type=float, default=0.01,
+                        help="Penalty weight for mentioning history metadata words not in target (default: 0.5)")
 
     
     # Novelty Reward (popularity-based reward)
@@ -485,10 +546,15 @@ def parse_args():
     parser.add_argument("--proxy_label_reward", action="store_true",
                         help="Use proxy label reward: treats items similar to target as soft labels. "
                              "Rewards predicting target-similar items proportional to their similarity.")
-    parser.add_argument("--proxy_k", type=int, default=10,
+    parser.add_argument("--proxy_k", type=int, default=100,
                         help="Number of proxy items (similar items) to use as soft labels")
     parser.add_argument("--proxy_label_coef", type=float, default=1.0,
                         help="Proxy label reward coefficient (weight for this reward component)")
+    parser.add_argument("--proxy_label_cutoff", type=float, default=0.1,)
+    parser.add_argument("--proxy_label_file", type=str, default=None,
+                        help="Path to pre-computed proxy labels JSON file. "
+                             "If None, automatically constructs path from data_name, emb_type, and emb_model_name. "
+                             "Example: data_emb/beauty_proxy_labels_k1000_random_th0.3_item_preference_1024_gemma-3-4b-it_mxbai-embed-large-v1.json")
     
     # Local Embedding-based Reward (alternative to RetrievalService)
     parser.add_argument("--use_local_embedding", action="store_true", 
@@ -510,7 +576,7 @@ def parse_args():
     parser.add_argument("--debug", action="store_true")
 
     # vllm for evaluation
-    parser.add_argument("--train_vllm_gpu_memory_utilization", type=float, default=0.5)
+    parser.add_argument("--train_vllm_gpu_memory_utilization", type=float, default=0.45)
     parser.add_argument("--gpu_memory_utilization", type=float, default=0.95)
     parser.add_argument("--eval_emb_gpu_memory_utilization", type=float, default=0.95)
     parser.add_argument("--eval_emb_batch_size", type=int, default=512)
@@ -544,80 +610,9 @@ def main():
     # vLLM 로깅 레벨 조정 (INFO 메시지 억제)
     std_logging.getLogger("vllm").setLevel(std_logging.ERROR)
     
-    # # Run name 설정
-    # if args.run_name is None:
-    #     args.run_name = f"grpo_{args.reward_type}@{args.k}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
-    
     # Trainer 초기화 및 학습
     trainer = GRPOTrainerWrapper(args)
-    
-    try:
-        trainer.train()
-    finally:
-        # 학습 완료 후 명시적으로 모든 리소스 정리
-        print("\n" + "="*80)
-        # print("🧹 Final cleanup...")
-        # print("="*80)
-        
-        # # Trainer 내부 리소스 정리
-        # # vLLM 먼저 정리
-        # if hasattr(trainer, 'grpo_trainer') and trainer.grpo_trainer is not None:
-        #     if hasattr(trainer.grpo_trainer, 'vllm') and trainer.grpo_trainer.vllm is not None:
-        #         print("🧹 Final: Cleaning up vLLM...")
-        #         try:
-        #             vllm_instance = trainer.grpo_trainer.vllm
-        #             if hasattr(vllm_instance, 'llm_engine'):
-        #                 engine = vllm_instance.llm_engine
-        #                 if hasattr(engine, 'shutdown'):
-        #                     engine.shutdown()
-        #                 if hasattr(engine, 'model_executor'):
-        #                     del engine.model_executor
-        #                 del engine
-        #             del vllm_instance
-        #             trainer.grpo_trainer.vllm = None
-        #         except Exception as e:
-        #             print(f"⚠️ Warning during final vLLM cleanup: {e}")
-        
-        # # 중간 정리
-        # cleanup_dist_env_and_memory()
-        # torch.cuda.empty_cache()
-        # gc.collect()
-        
-        # # Model 정리
-        # if hasattr(trainer, 'model') and trainer.model is not None:
-        #     if hasattr(trainer.model, 'cpu'):
-        #         trainer.model.cpu()
-        #     del trainer.model
-        
-        # # GRPO Trainer 정리
-        # if hasattr(trainer, 'grpo_trainer') and trainer.grpo_trainer is not None:
-        #     if hasattr(trainer.grpo_trainer, 'model'):
-        #         trainer.grpo_trainer.model = None
-        #     if hasattr(trainer.grpo_trainer, 'accelerator'):
-        #         trainer.grpo_trainer.accelerator = None
-        #     del trainer.grpo_trainer
-        
-        # # Reward function 정리
-        # if hasattr(trainer, 'reward_fn') and trainer.reward_fn is not None:
-        #     # Embedding model 정리
-        #     if hasattr(trainer.reward_fn, 'embedding_model'):
-        #         del trainer.reward_fn.embedding_model
-        #     del trainer.reward_fn
-        
-        # del trainer
-        
-        # # GPU 메모리 완전히 해제
-        # cleanup_dist_env_and_memory()
-        # torch.cuda.empty_cache()
-        # gc.collect()
-        
-        # if torch.cuda.is_available():
-        #     torch.cuda.synchronize()
-        #     print(f"💾 Final GPU Memory: {torch.cuda.memory_allocated() / 1024**3:.2f} GB allocated")
-        #     print(f"💾 Final GPU Memory reserved: {torch.cuda.memory_reserved() / 1024**3:.2f} GB reserved")
-    
-    print("✓ Done!")
-
+    trainer.train()
 
 
 if __name__ == "__main__":

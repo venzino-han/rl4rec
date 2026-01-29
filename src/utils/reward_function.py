@@ -10,6 +10,8 @@ from typing import List, Dict, Optional, Tuple
 import ray
 from pathlib import Path
 import argparse
+import nltk
+from nltk.corpus import stopwords
 
 
 def calculate_dcg(relevance_scores: torch.Tensor, k: Optional[int] = None) -> torch.Tensor:
@@ -800,65 +802,15 @@ class SimilarHistoryItemMentionReward:
         return rewards
 
 
-class BrandMentionReward:
+class MetadataMentionReward:
     """
-    타겟 아이템의 브랜드를 언급할 경우 보상 (0.5점)
-    """
+    타겟 아이템의 메타데이터(브랜드, 카테고리 등)를 언급할수록 보상을 제공하는 리워드 함수.
     
-    def __init__(
-        self,
-        data_name: str,
-        device: str = "cuda",
-        data_dir: str = "data",
-    ):
-        """
-        Args:
-            data_name: 데이터셋 이름
-            device: 디바이스
-            data_dir: 데이터 디렉토리
-        """
-        self.__name__ = "BrandMentionReward"
-        self.data_name = data_name
-        self.device = device
-        
-        # 아이템 메타데이터 로드
-        with open(f"{data_dir}/{data_name}/meta_text_fix.json", "r") as f:
-            item_metadata = json.load(f)
-            item_metadata = {int(k): v for k, v in item_metadata.items()}
-        self.item_brands = {item_id: str(item_metadata[item_id]["brand"]) for item_id in item_metadata}
-        
-        print(f"✓ BrandMentionReward initialized")
-        print(f"  - Loaded brands for {len(self.item_brands)} items")
-    
-    def __call__(
-        self,
-        generated_texts: List[str],
-        targets: List[int],
-        **kwargs
-    ) -> List[float]:
-        """
-        생성된 텍스트에서 타겟 아이템의 브랜드 언급 여부를 확인하여 보상
-        
-        Args:
-            generated_texts: [batch_size] 생성된 텍스트
-            targets: [batch_size] 타겟 아이템 ID
-            
-        Returns:
-            rewards: [batch_size] 보상 값 (0 또는 0.5)
-        """
-        rewards = []
-        
-        for gen_text, target_id in zip(generated_texts, targets):
-            reward = 0.0
-            if self.item_brands[target_id].lower() in gen_text.lower():
-                reward = 0.5
-            rewards.append(reward)
-        return rewards
-
-
-class CategoryMentionReward:
-    """
-    타겟 아이템의 카테고리를 언급할 경우 보상 (0.5점)
+    특징:
+    1. 메타데이터의 단어들을 많이 언급할수록 리워드 증가
+    2. 히스토리 아이템의 메타데이터 중 타겟에 없는 단어를 언급하면 패널티 적용
+    3. 생성된 텍스트의 길이에 반비례하도록 리워드 정규화
+    4. 불용어(none, a, the 등)는 리워드 계산에서 제외
     """
     
     def __init__(
@@ -866,47 +818,158 @@ class CategoryMentionReward:
         data_name: str,
         device: str = "cuda",
         data_dir: str = "data",
+        base_reward: float = 0.1,
+        length_penalty_alpha: float = 0.5,
+        min_length: int = 10,
+        history_penalty_weight: float = 0.01,
     ):
         """
         Args:
             data_name: 데이터셋 이름
             device: 디바이스
             data_dir: 데이터 디렉토리
+            base_reward: 메타데이터 단어당 기본 보상 점수
+            length_penalty_alpha: 길이 패널티 강도 (0~1, 높을수록 긴 텍스트에 불리)
+            min_length: 최소 텍스트 길이 (이보다 짧으면 패널티 없음)
+            history_penalty_weight: 히스토리 메타데이터 잘못 언급시 패널티 가중치
         """
-        self.__name__ = "CategoryMentionReward"
+        self.__name__ = "MetadataMentionReward"
         self.data_name = data_name
         self.device = device
+        self.base_reward = base_reward
+        self.length_penalty_alpha = length_penalty_alpha
+        self.min_length = min_length
+        self.history_penalty_weight = history_penalty_weight
+        # NLTK stopwords 다운로드 및 로드 (한번만 실행)
+        try:
+            self.stopwords = set(stopwords.words('english'))
+        except LookupError:
+            print("Downloading NLTK stopwords...")
+            nltk.download('stopwords', quiet=True)
+            self.stopwords = set(stopwords.words('english'))
+        
+        # 추가 불용어 (도메인 특화)
+        additional_stopwords = {'none', 'null', 'n/a', 'na'}
+        self.stopwords.update(additional_stopwords)
         
         # 아이템 메타데이터 로드
         with open(f"{data_dir}/{data_name}/meta_text_fix.json", "r") as f:
             item_metadata = json.load(f)
             item_metadata = {int(k): v for k, v in item_metadata.items()}
-        self.item_categories = {item_id: str(item_metadata[item_id]["category"]) for item_id in item_metadata}
-        print(f"✓ CategoryMentionReward initialized")
-        print(f"  - Loaded categories for {len(self.item_categories)} items")
+        
+        # 각 아이템의 메타데이터 단어 집합을 미리 추출
+        self.item_metadata_words = {}
+        for item_id, meta in item_metadata.items():
+            words = set()
+            if "title" in meta and meta["title"]:
+                title_words = self._extract_words(str(meta["title"]))
+                words.update(title_words)
+            
+            # 브랜드 추출
+            if "brand" in meta and meta["brand"]:
+                brand_words = self._extract_words(str(meta["brand"]))
+                words.update(brand_words)
+            
+            # 카테고리 추출
+            # if "category" in meta and meta["category"]:
+            #     category_words = self._extract_words(str(meta["category"]))
+            #     words.update(category_words)
+            
+            self.item_metadata_words[item_id] = words
+        
+        print(f"✓ MetadataMentionReward initialized")
+        print(f"  - Loaded metadata for {len(self.item_metadata_words)} items")
+        print(f"  - Base reward: {self.base_reward}")
+        print(f"  - Length penalty alpha: {self.length_penalty_alpha}")
+        print(f"  - History penalty weight: {self.history_penalty_weight}")
+        print(f"  - Stopwords excluded: {len(self.stopwords)} (NLTK English + custom)")
+    
+    def _extract_words(self, text: str) -> set:
+        """
+        텍스트에서 단어를 추출하고 불용어를 제거
+        
+        Args:
+            text: 입력 텍스트
+            
+        Returns:
+            불용어가 제거된 단어 집합 (소문자)
+        """
+        # 알파벳과 숫자만 남기고 공백으로 구분
+        import re
+        words = re.findall(r'\b[a-zA-Z0-9]+\b', text.lower())
+        
+        # 불용어 제거 및 길이가 1인 단어 제거
+        filtered_words = {w for w in words if w not in self.stopwords and len(w) > 1}
+        
+        return filtered_words
     
     def __call__(
         self,
         generated_texts: List[str],
         targets: List[int],
+        histories: List[List[int]],
         **kwargs
     ) -> List[float]:
         """
-        생성된 텍스트에서 타겟 아이템의 카테고리 언급 여부를 확인하여 보상
+        생성된 텍스트에서 타겟 아이템의 메타데이터 언급도를 평가하여 보상
+        히스토리 아이템의 메타데이터 중 타겟에 없는 단어 언급시 패널티 적용
         
         Args:
             generated_texts: [batch_size] 생성된 텍스트
             targets: [batch_size] 타겟 아이템 ID
+            **kwargs: histories (List[List[int]]): [batch_size, seq_len] 히스토리 아이템 ID
             
         Returns:
-            rewards: [batch_size] 보상 값 (0 또는 0.5)
+            rewards: [batch_size] 보상 값
         """
         rewards = []
         
-        for gen_text, target_id in zip(generated_texts, targets):
-            reward = 0.0
-            if self.item_categories[target_id].lower() in gen_text.lower():
-                reward = 0.5
+        for idx, (gen_text, target_id) in enumerate(zip(generated_texts, targets)):
+            # 타겟 아이템의 메타데이터 단어
+            target_words = self.item_metadata_words.get(target_id, set())
+            
+            if not target_words:
+                rewards.append(0.0)
+                continue
+            
+            # 생성된 텍스트에서 단어 추출
+            gen_words = self._extract_words(gen_text)
+            
+            # 메타데이터 단어가 생성된 텍스트에 몇 개나 언급되었는지 카운트
+            matched_words = target_words.intersection(gen_words)
+            match_count = len(matched_words)
+            
+            # 기본 리워드 계산 (언급된 메타데이터 단어 수에 비례)
+            reward = match_count * self.base_reward
+            
+            # 히스토리 아이템 메타데이터 패널티 계산
+            if histories is not None and idx < len(histories):
+                history_items = histories[idx]
+                
+                # 히스토리 아이템들의 메타데이터 단어 수집
+                history_words = set()
+                for hist_id in history_items:
+                    hist_words = self.item_metadata_words.get(hist_id, set())
+                    history_words.update(hist_words)
+                
+                # 히스토리에만 있고 타겟에는 없는 단어 (잘못 언급하면 안되는 단어)
+                wrong_words = history_words - target_words
+                
+                # 생성된 텍스트에서 잘못된 단어가 언급된 개수
+                wrong_mention_count = len(wrong_words.intersection(gen_words))
+                
+                # 패널티 적용
+                penalty = wrong_mention_count * self.history_penalty_weight
+                reward = reward - penalty
+                reward = max(reward, 0.0)
+            
+            # 길이 패널티 적용: 텍스트가 길수록 리워드를 낮춤
+            text_length = len(gen_text.split())
+            if text_length > self.min_length:
+                # length_factor: 텍스트가 길수록 작아짐 (0~1)
+                length_factor = 1.0 / (1.0 + self.length_penalty_alpha * (text_length - self.min_length) / self.min_length)
+                reward = reward * length_factor
+            
             rewards.append(reward)
         
         return rewards
@@ -956,6 +1019,9 @@ class LocalEmbeddingRewardFunction:
                                기존 base_reward에 추가로 더해짐
             proxy_k: Proxy label로 사용할 유사한 아이템 개수
             proxy_label_coef: Proxy label 리워드 계수
+            proxy_label_cutoff: Proxy label 유사도 역치 (default: 0.0)
+                               이 값 미만의 유사도를 가진 아이템은 proxy label에서 제외
+                               예: 0.5로 설정하면 유사도 0.5 미만 아이템은 필터링
             max_steps: 최대 학습 스텝 수 (novelty annealing 계산에 사용)
         """
         self.__name__ = "LocalEmbeddingRewardFunction"
@@ -994,13 +1060,21 @@ class LocalEmbeddingRewardFunction:
             self.proxy_label_reward = args.proxy_label_reward
             self.proxy_k = args.proxy_k
             self.proxy_label_coef = args.proxy_label_coef
+            self.proxy_label_cutoff = args.proxy_label_cutoff if hasattr(args, "proxy_label_cutoff") else 0.98
         else:
             self.proxy_label_reward = False
             self.proxy_k = 0
             self.proxy_label_coef = 0
+            self.proxy_label_cutoff = 0.0
         
         # Training 관련 파라미터
         self.max_steps = args.max_steps
+        
+        # Reward 분해 추적을 위한 변수 (wandb 로깅용)
+        self.last_base_rewards = None
+        self.last_proxy_label_rewards = None
+        self.last_target_emb_rewards = None
+        self.last_infonce_rewards = None
         
         print(f"💰 Reward configuration:")
         print(f"  - Reward type: {self.reward_type}")
@@ -1032,6 +1106,8 @@ class LocalEmbeddingRewardFunction:
             print(f"  - Proxy label reward: ENABLED")
             print(f"  - Proxy K: {self.proxy_k}")
             print(f"  - Proxy label coefficient: {self.proxy_label_coef}")
+            print(f"  - Proxy label cutoff: {self.proxy_label_cutoff}")
+            print(f"    → Items with similarity < {self.proxy_label_cutoff} will be excluded from proxy labels")
             print(f"  - Use top-{self.proxy_k} similar items as soft labels with similarity-weighted NDCG")
             print(f"  - Final reward = base_reward + proxy_label_coef * proxy_label_ndcg")
         
@@ -1079,11 +1155,18 @@ class LocalEmbeddingRewardFunction:
         # Proxy label을 위한 아이템 간 유사도 로드 또는 계산
         if self.proxy_label_reward:
             # 저장된 proxy labels 파일 확인
-            proxy_labels_file = f"data_emb/{self.data_name}_proxy_labels_k100_{args.emb_type}_{emb_model_name_dir}.json"
+            # args.proxy_label_file이 지정되어 있으면 그것을 사용, 아니면 자동 생성
+            if hasattr(args, 'proxy_label_file') and args.proxy_label_file is not None:
+                proxy_labels_file = args.proxy_label_file
+                print(f"📦 Using user-specified proxy labels file: {proxy_labels_file}")
+            else:
+                proxy_labels_file = f"data_emb/{self.data_name}_proxy_labels_k100_{args.emb_type}_{emb_model_name_dir}.json"
+                print(f"📦 Using auto-generated proxy labels path: {proxy_labels_file}")
+            
             proxy_labels_path = Path(proxy_labels_file)
             
             if proxy_labels_path.exists():
-                print(f"📦 Loading pre-computed proxy labels from: {proxy_labels_file}")
+                print(f"✓ Loading pre-computed proxy labels from: {proxy_labels_file}")
                 self.item_proxy_labels = self._load_proxy_labels(proxy_labels_path)
                 print(f"✓ Loaded proxy labels for {len(self.item_proxy_labels)} items")
             else:
@@ -1131,15 +1214,33 @@ class LocalEmbeddingRewardFunction:
         
         # JSON에서 로드한 데이터를 텐서로 변환
         item_proxy_labels = {}
+        total_filtered = 0  # 필터링된 proxy 개수 통계
+        
         for item_id_str, proxy_list in proxy_labels_json.items():
-            proxy_list = proxy_list[:self.proxy_k]
             item_id = int(item_id_str)
             
-            # List[Tuple[item_id, similarity]]를 두 개의 텐서로 분리
-            proxy_ids = torch.tensor([p[0] for p in proxy_list], dtype=torch.long, device=self.device)
-            proxy_sims = torch.tensor([p[1] for p in proxy_list], dtype=torch.float32, device=self.device)
+            # 1. proxy_k 개수만큼 자르기
+            proxy_list = proxy_list[:self.proxy_k]
             
-            item_proxy_labels[item_id] = (proxy_ids, proxy_sims)
+            # 2. cutoff 이하의 아이템 필터링
+            if self.proxy_label_cutoff > 0:
+                filtered_proxy_list = [(pid, sim) for pid, sim in proxy_list if sim >= self.proxy_label_cutoff]
+                total_filtered += len(proxy_list) - len(filtered_proxy_list)
+                proxy_list = filtered_proxy_list
+            
+            # 3. 필터링 후 남은 proxy가 있는 경우만 저장
+            if len(proxy_list) > 0:
+                # List[Tuple[item_id, similarity]]를 두 개의 텐서로 분리
+                proxy_ids = torch.tensor([p[0] for p in proxy_list], dtype=torch.long, device=self.device)
+                proxy_sims = torch.tensor([p[1] for p in proxy_list], dtype=torch.float32, device=self.device)
+                
+                item_proxy_labels[item_id] = (proxy_ids, proxy_sims)
+        
+        # 필터링 통계 출력
+        if self.proxy_label_cutoff > 0:
+            print(f"  - Filtered {total_filtered} proxy labels below cutoff {self.proxy_label_cutoff}")
+            avg_proxies = sum(len(v[0]) for v in item_proxy_labels.values()) / max(1, len(item_proxy_labels))
+            print(f"  - Average proxies per item after filtering: {avg_proxies:.2f}")
         
         return item_proxy_labels
     
@@ -1650,6 +1751,10 @@ class LocalEmbeddingRewardFunction:
             base_rewards = 0.7 * ndcg + 0.3 * hit
         else:
             raise ValueError(f"Unknown reward_type: {self.reward_type}")
+
+        # Base rewards를 wandb 로깅을 위해 저장
+        self.last_base_rewards = base_rewards.detach().cpu()
+
         # Proxy label reward 사용 여부에 따라 분기
         if self.proxy_label_reward:
             # Proxy label 리워드 사용 시: 기존 base_reward + proxy_label_reward
@@ -1658,8 +1763,14 @@ class LocalEmbeddingRewardFunction:
             # 2. Proxy label NDCG 계산
             proxy_label_rewards = self._compute_proxy_label_ndcg(query_embeddings, user_ids, predicted_scores)
             
+            # Wandb 로깅을 위해 저장
+            self.last_proxy_label_rewards = proxy_label_rewards.detach().cpu()
+            
             # 3. 두 리워드를 합산
             base_rewards = base_rewards + self.proxy_label_coef * proxy_label_rewards
+        else:
+            self.last_proxy_label_rewards = None
+        
         
         # Novelty reward 사용 여부에 따라 분기
         if self.novelty_reward and self.item_popularity_weights is not None:
@@ -1710,15 +1821,49 @@ class LocalEmbeddingRewardFunction:
         # Target embedding 유사도 리워드 추가
         if self.target_emb_reward and self.target_embeddings is not None:
             target_emb_rewards = self._compute_target_embedding_reward(query_embeddings, user_ids)
+            self.last_target_emb_rewards = target_emb_rewards.detach().cpu()
             rewards = rewards + self.target_emb_coef * target_emb_rewards
+        else:
+            self.last_target_emb_rewards = None
         
         # InfoNCE 리워드 추가
         if self.infonce_reward and self.infonce_item_embeddings is not None:
             infonce_rewards = self._compute_infonce_reward(query_embeddings, user_ids)
+            self.last_infonce_rewards = infonce_rewards.detach().cpu()
             rewards = rewards + self.infonce_coef * infonce_rewards
+        else:
+            self.last_infonce_rewards = None
         
         # 정규화 (optional)
         if self.normalize and rewards.std() > 0:
             rewards = (rewards - rewards.mean()) / (rewards.std() + 1e-8)
         
         return rewards
+    
+    def get_reward_breakdown(self) -> Dict[str, torch.Tensor]:
+        """
+        마지막 계산된 리워드의 구성 요소들을 반환
+        Wandb 로깅 등에 사용
+        
+        Returns:
+            Dict[str, torch.Tensor]: 리워드 구성 요소들
+                - "base_reward": 기본 리워드 (NDCG/Hit/MRR)
+                - "proxy_label_reward": Proxy label 리워드 (사용 시)
+                - "target_emb_reward": Target embedding 유사도 리워드 (사용 시)
+                - "infonce_reward": InfoNCE 리워드 (사용 시)
+        """
+        breakdown = {}
+        
+        if self.last_base_rewards is not None:
+            breakdown["base_reward"] = self.last_base_rewards
+        
+        if self.last_proxy_label_rewards is not None:
+            breakdown["proxy_label_reward"] = self.last_proxy_label_rewards
+        
+        if self.last_target_emb_rewards is not None:
+            breakdown["target_emb_reward"] = self.last_target_emb_rewards
+        
+        if self.last_infonce_rewards is not None:
+            breakdown["infonce_reward"] = self.last_infonce_rewards
+        
+        return breakdown

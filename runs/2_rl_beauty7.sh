@@ -1,17 +1,20 @@
 #!/bin/bash
 
 max_steps=1000
+dataset_names=(beauty sports)
 dataset_names=(beauty toys sports yelp)
-device=1
+device=7
 PROMPT_TYPE="seq_rec_new"
+PROMPT_TYPE="seq_rec"
 
 TRACKER="python3 utils/device_tracker.py"
 
+for seed in 22 42 62; do
 for dataset_name in ${dataset_names[@]}; do
     echo "Training ${dataset_name}..."
 for temp in 0.6 ; do
 for loss_type in dr_grpo; do
-    RUN_NAME="${dataset_name}_${PROMPT_TYPE}_proxy_label_0.1_${loss_type}_token_pref_k1000_128_1000_temp${temp}_lr2e-6"
+    RUN_NAME="${dataset_name}_${PROMPT_TYPE}_main_meta0.01_proxy1000_seed${seed}_k1000_128_steps${max_steps}_temp${temp}_lr1e-6"
     CHECKPOINT_DIR="checkpoints/$RUN_NAME"
     FINAL_CHECKPOINT_DIR="$CHECKPOINT_DIR/checkpoint-$max_steps"
 
@@ -23,21 +26,30 @@ for loss_type in dr_grpo; do
         --data_name $dataset_name \
         --reward_type "ndcg" \
         --k 1000 \
+        --seed $seed \
         --loss_type $loss_type \
+        --importance_sampling_level token \
         --use_local_embedding \
         --prompt_type $PROMPT_TYPE \
+        --proxy_label_reward \
+        --proxy_k 1000 \
+        --proxy_label_coef 0.1 \
+        --proxy_label_file data_emb/${dataset_name}_proxy_labels_k1000_random_th0.3_item_preference_1024_gemma-3-4b-it_mxbai-embed-large-v1.json \
+        --use_metadata_reward \
+        --metadata_base_reward 0.01 \
+        --metadata_length_penalty 1.0 \
+        --metadata_min_length 8 \
+        --history_penalty_weight 0.001 \
         --use_brand \
         --use_category \
         --emphasize_recent_item \
         --emb_model_name "mixedbread-ai/mxbai-embed-large-v1" \
         --emb_type item_preference_1024_gemma-3-4b-it \
-        --proxy_label_reward \
-        --proxy_k 100 \
-        --proxy_label_coef 0.1 \
+        --reference_model_kld_coef 0.001 \
         --max_new_tokens 128 \
         --num_epochs 1 \
         --batch_size 32 \
-        --learning_rate 2e-6 \
+        --learning_rate 1e-6 \
         --train_temperature $temp \
         --max_steps $max_steps \
         --checkpoint_dir $CHECKPOINT_DIR \
@@ -45,7 +57,7 @@ for loss_type in dr_grpo; do
         --save_total_limit 1 \
         --log_interval 10 \
         --eval_interval 5000 \
-        --save_interval 1000 \
+        --save_interval $max_steps \
         --device "cuda" \
         "$@"
 
@@ -66,6 +78,7 @@ for loss_type in dr_grpo; do
         "$@"
 
     $TRACKER free $device
+done
 done
 done
 done

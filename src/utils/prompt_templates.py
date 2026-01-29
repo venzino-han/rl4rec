@@ -20,8 +20,8 @@ PROMPT_TEMPLATES = {
             'Your task is to infer one or multiple kinds of products they may want to buy next, and generate relevant query terms that can be used to search for these potential products.\n' +
             'Below is the user purchase history:\n',
     'tail': 'Based on this user\'s purchase history, generate multiple relevant query terms that can be used to search for these potential products.\n' +
-            'Each query must strictly follow the format: "[Item Name]: [Item Attributes, Related User Preferences]".\n' +
-            'The response should start with "Considering the user\'s recent purchase of [Item Name], ..."',
+            'Each query must follow the format: "[Item Name]: [Item Attributes, Related User Preferences]\n'
+        #     'Don\'t include any other text in the response.',
     },
 
     'seq_rec_new_2': {

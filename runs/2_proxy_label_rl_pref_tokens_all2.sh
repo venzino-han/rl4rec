@@ -3,7 +3,7 @@
 max_steps=1000
 dataset_names=(beauty toys sports yelp)
 device=2
-PROMPT_TYPE="seq_rec_new_2"
+PROMPT_TYPE="seq_rec_new"
 
 TRACKER="python3 utils/device_tracker.py"
 

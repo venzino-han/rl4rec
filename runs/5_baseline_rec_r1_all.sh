@@ -2,16 +2,18 @@
 
 max_steps=1000
 dataset_names=(beauty toys sports yelp)
-device=1
+device=4
+PROMPT_TYPE="seq_rec"
 PROMPT_TYPE="seq_rec_new"
 
 TRACKER="python3 utils/device_tracker.py"
 
+for seed in 22 42 62; do
 for dataset_name in ${dataset_names[@]}; do
     echo "Training ${dataset_name}..."
 for temp in 0.6 ; do
 for loss_type in dr_grpo; do
-    RUN_NAME="${dataset_name}_${PROMPT_TYPE}_proxy_label_0.1_${loss_type}_token_pref_k1000_128_1000_temp${temp}_lr2e-6"
+    RUN_NAME="${dataset_name}_rec_r1_seed${seed}_k1000_128_steps${max_steps}_temp${temp}_lr1e-6"
     CHECKPOINT_DIR="checkpoints/$RUN_NAME"
     FINAL_CHECKPOINT_DIR="$CHECKPOINT_DIR/checkpoint-$max_steps"
 
@@ -23,6 +25,8 @@ for loss_type in dr_grpo; do
         --data_name $dataset_name \
         --reward_type "ndcg" \
         --k 1000 \
+        --reference_model_kld_coef 0.005 \
+        --seed $seed \
         --loss_type $loss_type \
         --use_local_embedding \
         --prompt_type $PROMPT_TYPE \
@@ -30,14 +34,11 @@ for loss_type in dr_grpo; do
         --use_category \
         --emphasize_recent_item \
         --emb_model_name "mixedbread-ai/mxbai-embed-large-v1" \
-        --emb_type item_preference_1024_gemma-3-4b-it \
-        --proxy_label_reward \
-        --proxy_k 100 \
-        --proxy_label_coef 0.1 \
+        --emb_type item_meta_only \
         --max_new_tokens 128 \
         --num_epochs 1 \
         --batch_size 32 \
-        --learning_rate 2e-6 \
+        --learning_rate 1e-6 \
         --train_temperature $temp \
         --max_steps $max_steps \
         --checkpoint_dir $CHECKPOINT_DIR \
@@ -54,7 +55,7 @@ for loss_type in dr_grpo; do
         --model_name "google/gemma-3-1b-it" \
         --data_name $dataset_name \
         --emb_model_name "mixedbread-ai/mxbai-embed-large-v1" \
-        --emb_type item_preference_1024_gemma-3-4b-it \
+        --emb_type item_meta_only \
         --prompt_type $PROMPT_TYPE \
         --use_local_embedding \
         --emphasize_recent_item \
@@ -66,6 +67,7 @@ for loss_type in dr_grpo; do
         "$@"
 
     $TRACKER free $device
+done
 done
 done
 done
