@@ -1,6 +1,6 @@
 #!/bin/bash
 
-max_steps=500
+max_steps=1000
 dataset_names=(toys sports yelp)
 dataset_names=(beauty toys sports yelp)
 device=2
@@ -14,7 +14,7 @@ for dataset_name in ${dataset_names[@]}; do
     echo "Training ${dataset_name}..."
 for temp in 0.6 ; do
 for loss_type in dr_grpo; do
-    RUN_NAME="${dataset_name}_recent2_proxy1000_meta0.01_128_steps${max_steps}_temp${temp}_lr1e-6"
+    RUN_NAME="${dataset_name}_recent2_proxy1000_meta0.01_256_steps${max_steps}_temp${temp}_lr1e-6"
     CHECKPOINT_DIR="checkpoints/$RUN_NAME"
     FINAL_CHECKPOINT_DIR="$CHECKPOINT_DIR/checkpoint-$max_steps"
 
@@ -37,7 +37,7 @@ for loss_type in dr_grpo; do
         --emb_model_name "mixedbread-ai/mxbai-embed-large-v1" \
         --emb_type item_preference_1024_gemma-3-4b-it \
         --reference_model_kld_coef 0.001 \
-        --max_new_tokens 128 \
+        --max_new_tokens 256 \
         --num_epochs 1 \
         --batch_size 32 \
         --learning_rate 1e-6 \
@@ -54,7 +54,7 @@ for loss_type in dr_grpo; do
         --metadata_base_reward 0.01 \
         --metadata_length_penalty 1.0 \
         --metadata_min_length 8 \
-        --history_penalty_weight 0.001 \
+        --history_penalty_weight 0.01 \
         --proxy_label_reward \
         --proxy_k 1000 \
         --proxy_label_coef 1.0 \
@@ -72,7 +72,7 @@ for loss_type in dr_grpo; do
         --emphasize_recent_item \
         --use_brand \
         --use_category \
-        --max_new_tokens 128 \
+        --max_new_tokens 256 \
         --final_checkpoint_dir $FINAL_CHECKPOINT_DIR \
         --device "cuda" \
         "$@"
