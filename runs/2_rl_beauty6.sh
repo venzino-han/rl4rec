@@ -1,19 +1,22 @@
 #!/bin/bash
 
-max_steps=1000
-dataset_names=(beauty sports)
-dataset_names=(beauty toys sports yelp)
+max_steps=500
+
+dataset_names=(toys sports yelp)
+dataset_names=(sports yelp)
 device=6
 PROMPT_TYPE="seq_rec_new"
 
 TRACKER="python3 utils/device_tracker.py"
+
+max_new_tokens=128
 
 for seed in 42 22 62; do
 for dataset_name in ${dataset_names[@]}; do
     echo "Training ${dataset_name}..."
 for temp in 0.6 ; do
 for loss_type in dr_grpo; do
-    RUN_NAME="${dataset_name}_main_meta0.01_proxy1000_seed${seed}_k1000_128_steps${max_steps}_temp${temp}_lr1e-6"
+    RUN_NAME="${dataset_name}_anchor_meta0.01_proxy1000_0.05_seed${seed}_kd0.001_k1000_${max_new_tokens}_steps${max_steps}_temp${temp}_lr1e-6"
     CHECKPOINT_DIR="checkpoints/$RUN_NAME"
     FINAL_CHECKPOINT_DIR="$CHECKPOINT_DIR/checkpoint-$max_steps"
 
@@ -35,17 +38,16 @@ for loss_type in dr_grpo; do
         --metadata_length_penalty 1.0 \
         --metadata_min_length 8 \
         --history_penalty_weight 0.001 \
-        --proxy_label_reward \
-        --proxy_k 1000 \
-        --proxy_label_coef 0.1 \
-        --proxy_label_file data_emb/${dataset_name}_proxy_labels_k1000_random_th0.3_item_preference_1024_gemma-3-4b-it_mxbai-embed-large-v1.json \
+        --anchor_reward \
+        --anchor_coef 1.0 \
+        --anchor_penalty_mode "soft" \
         --use_brand \
         --use_category \
         --emphasize_recent_item \
         --emb_model_name "mixedbread-ai/mxbai-embed-large-v1" \
         --emb_type item_preference_1024_gemma-3-4b-it \
         --reference_model_kld_coef 0.001 \
-        --max_new_tokens 128 \
+        --max_new_tokens $max_new_tokens \
         --num_epochs 1 \
         --batch_size 32 \
         --learning_rate 1e-6 \
@@ -59,6 +61,10 @@ for loss_type in dr_grpo; do
         --save_interval $max_steps \
         --device "cuda" \
         "$@"
+        # --proxy_label_reward \
+        # --proxy_k 1000 \
+        # --proxy_label_coef 0.05 \
+        # --proxy_label_file data_emb/${dataset_name}_proxy_labels_k1000_random_th0.3_item_preference_1024_gemma-3-4b-it_mxbai-embed-large-v1.json \
 
     CUDA_VISIBLE_DEVICES=$device python3 src/grpo_eval.py \
         --run_name $RUN_NAME \
@@ -71,7 +77,7 @@ for loss_type in dr_grpo; do
         --emphasize_recent_item \
         --use_brand \
         --use_category \
-        --max_new_tokens 128 \
+        --max_new_tokens $max_new_tokens \
         --final_checkpoint_dir $FINAL_CHECKPOINT_DIR \
         --device "cuda" \
         "$@"

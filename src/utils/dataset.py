@@ -50,6 +50,7 @@ class PromptGenerator:
         include_target_date: bool = False,
         use_sasrec: bool = False,
         sasrec_top_k: int = 5,
+        use_relative_date: bool = False,
     ):
         """
         Args:
@@ -72,6 +73,7 @@ class PromptGenerator:
             include_target_date: 타겟/레이블 아이템의 구매 날짜를 프롬프트 마지막에 포함할지 여부
             use_sasrec: SASRec 추천 결과를 프롬프트에 포함할지 여부
             sasrec_top_k: SASRec 추천 결과에서 상위 K개 아이템만 포함
+            use_relative_date: 상대 날짜 표기 사용 여부 (True면 타겟 날짜 기준으로 "(D-10)", "(D-20)" 형식으로 표시)
         """
         self.item_metadata = item_metadata
         self.data_name = data_name
@@ -90,6 +92,7 @@ class PromptGenerator:
         self.include_target_date = include_target_date
         self.use_sasrec = use_sasrec
         self.sasrec_top_k = sasrec_top_k
+        self.use_relative_date = use_relative_date
         
         # 데이터셋에 따라 적절한 프롬프트 템플릿 선택
         if data_name == 'yelp':
@@ -156,6 +159,11 @@ class PromptGenerator:
         # 히스토리 텍스트 리스트
         history_text_list = []
         
+        # 타겟 타임스탬프 가져오기 (상대 날짜 계산 및 days_filter에 사용)
+        target_timestamp = 0
+        if target_item_id is not None and target_item_id in item_to_review:
+            target_timestamp = int(item_to_review[target_item_id].get('timestamp', 0))
+        
         # 각 아이템 처리
         for idx, item_id in enumerate(item_ids):
             item_data = self.item_metadata.get(item_id)
@@ -164,14 +172,14 @@ class PromptGenerator:
                 print(f"⚠️  Item metadata not found for item {item_id}")
                 continue
 
-            target_timestamp = int(item_to_review[target_item_id].get('timestamp', 0))
             # 시간 필터링 (days_filter가 설정되어 있고 target_timestamp가 주어진 경우)
-            if self.days_filter is not None:
-                review = item_to_review[item_id]
-                timestamp = int(review.get('timestamp', 0))
-                if target_timestamp - timestamp > self.days_filter * 24 * 60 * 60:
-                    # print(f"⚠️  Item timestamp is too old for item {item_id}")
-                    continue
+            if self.days_filter is not None and target_timestamp > 0:
+                review = item_to_review.get(item_id)
+                if review:
+                    timestamp = int(review.get('timestamp', 0))
+                    if target_timestamp - timestamp > self.days_filter * 24 * 60 * 60:
+                        # print(f"⚠️  Item timestamp is too old for item {item_id}")
+                        continue
             
             item_title = item_data.get('title', 'Unknown Item')
             item_brand = item_data.get('brand', 'Unknown Brand')
@@ -181,9 +189,17 @@ class PromptGenerator:
             item_history_text = ""
             # 날짜 정보 추가
             if self.use_date and item_id in item_to_review:
-                item_date = item_to_review[item_id].get('date', '')
-                if item_date:
-                    item_history_text += f"Date: {item_date}\n"
+                if self.use_relative_date and target_timestamp > 0:
+                    # 상대 날짜 계산 (D-N 형식)
+                    item_timestamp = int(item_to_review[item_id].get('timestamp', 0))
+                    if item_timestamp > 0:
+                        days_diff = (target_timestamp - item_timestamp) // (24 * 60 * 60)
+                        item_history_text += f"Date: (D-{days_diff})\n"
+                else:
+                    # 절대 날짜 표시
+                    item_date = item_to_review[item_id].get('date', '')
+                    if item_date:
+                        item_history_text += f"Date: {item_date}\n"
             
             # 기본 히스토리 포맷
             item_history_text += f"Item Title: {item_title}\n"
@@ -223,10 +239,18 @@ class PromptGenerator:
             item_description = self.item_metadata.get(last_item_id, {}).get('description', '')
 
             item_history_text = ""
-            if self.use_date:
-                item_date = item_to_review[last_item_id].get('date', '')
-                if item_date:
-                    item_history_text += f"Date: {item_date}\n"
+            if self.use_date and last_item_id in item_to_review:
+                if self.use_relative_date and target_timestamp > 0:
+                    # 상대 날짜 계산 (D-N 형식)
+                    item_timestamp = int(item_to_review[last_item_id].get('timestamp', 0))
+                    if item_timestamp > 0:
+                        days_diff = (target_timestamp - item_timestamp) // (24 * 60 * 60)
+                        item_history_text += f"Date: (D-{days_diff})\n"
+                else:
+                    # 절대 날짜 표시
+                    item_date = item_to_review[last_item_id].get('date', '')
+                    if item_date:
+                        item_history_text += f"Date: {item_date}\n"
 
             item_history_text += f"Item Title: {item_title}\n"
             if self.use_brand:
@@ -641,6 +665,9 @@ def create_dataloaders(
     # days_filter 파라미터 가져오기 (args에 있으면 사용, 없으면 None)
     days_filter = getattr(args, 'days_filter', None)
     
+    # use_relative_date 파라미터 가져오기 (args에 있으면 사용, 없으면 False)
+    use_relative_date = getattr(args, 'use_relative_date', False)
+    
     prompt_generator = PromptGenerator(
         item_metadata=item_metadata,
         data_name=args.data_name,
@@ -658,6 +685,7 @@ def create_dataloaders(
         include_target_date=include_target_date,
         use_sasrec=use_sasrec,
         sasrec_top_k=sasrec_top_k,
+        use_relative_date=use_relative_date,
     )
     
     # 데이터셋 생성

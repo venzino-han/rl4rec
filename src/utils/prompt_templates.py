@@ -23,6 +23,47 @@ PROMPT_TEMPLATES = {
             'Each query must follow the format: "[Item Name]: [Item Attributes, Related User Preferences]\n'
         #     'Don\'t include any other text in the response.',
     },
+    'seq_rec_temp': {
+    'head': (
+        'You are an intelligent shopping assistant capable of analyzing user purchase patterns over time.\n'
+        'Your goal is to predict the user\'s next immediate need based on their purchase history.\n'
+        'The input history is provided with relative timestamps (e.g., "(D-0)" means today, "(D-5)" means 5 days ago).\n\n'
+        'User Purchase History:\n'
+    ),
+    'tail': (
+        '\nInstruction:\n'
+        'Analyze the history and follow these 4 steps sequentially to generate the output:\n'
+        '1. Reasoning (Thinking): First, analyze the user\'s recent purchase patterns and intent. Explicitly determine which time window is most relevant and why.\n'
+        '2. Window Selection: Based on your reasoning, state the selected time window (e.g., "Last 7 Days").\n'
+        '3. Item Filtering: List the item titles that strictly fall within that window to ensure grounding.\n'
+        '4. Query Generation: Generate 3 diverse search queries based on the identified needs.\n\n'
+        'Output Format (Strictly follow this XML structure):\n'
+        '<thinking> [Your step-by-step reasoning about user intent and window selection] </thinking>\n'
+        '<window> [Selected Window] </window>\n'
+        '<items> [List of Item Titles in Window] </items>\n'
+        '<query> [Generated Query 1], [Generated Query 2], [Generated Query 3] </query>\n'
+    )
+    },
+
+    'seq_rec_temp_no_thinking': {
+    'head': (
+        'You are an intelligent shopping assistant capable of analyzing user purchase patterns over time.\n'
+        'Your goal is to predict the user\'s next immediate need based on their purchase history.\n'
+        'The input history is provided with relative timestamps (e.g., "(D-0)" means today, "(D-5)" means 5 days ago).\n\n'
+        'User Purchase History:\n'
+    ),
+    'tail': (
+        '\nInstruction:\n'
+        'Analyze the history and follow these 4 steps sequentially to generate the output:\n'
+        '1. Window Selection: Based on your reasoning, state the selected time window (e.g., "Last 7 Days").\n'
+        '2. Item Filtering: List the item titles that strictly fall within that window to ensure grounding.\n'
+        '3. Query Generation: Generate 3 diverse search queries based on the identified needs.\n\n'
+        'Output Format (Strictly follow this structure):\n'
+        '<window> [Selected Window] </window>\n'
+        '<items> [List of Item Titles in Window] </items>\n'
+        '<query> [Generated Query 1], [Generated Query 2], [Generated Query 3] </query>\n'
+    )
+    },
 
     'seq_rec_new_2': {
     'head': 'You are an intelligent shopping assistant that helps predict what users may want to purchase next. Below is a list of items a user has purchased recently.\n' +
@@ -57,6 +98,14 @@ PROMPT_TEMPLATES = {
                 'Below is the user purchase history:\n',
     'tail': 'Based on this user\'s purchase history, generate relevant query terms that can be used to search for these potential products.\n' +\
             'The response should be start with "Considering the user\'s most recent purchase of [Last Item Name], ..."',
+    },
+
+    'seq_rec_recent2': {
+    'head': 'You are an intelligent shopping assistant that helps predict what users may want to purchase next. Below is a list of items a user has purchased recently.\n' +\
+                'Your task is to infer one or multiple kinds of products they may want to buy next, and generate relevant query terms that can be used to search for these potential products.\n' +\
+                'Below is the user purchase history:\n',
+    'tail': 'Based on this user\'s purchase history, generate relevant query terms that can be used to search for these potential products.\n' +\
+            'The response should be start with "Considering the user\'s recent purchase of [Item Name], ..."',
     },
 
     'preference': {
@@ -157,5 +206,21 @@ PROMPT_TEMPLATES_YELP = {
                 'Start the response strictly with the format: "[Visited Business Name]: [Related User Preference]", followed by a brief explanation connecting it to the recommendations.\n' +
                 'Then, generate multiple relevant query terms for the potential next businesses.\n' +
                 'Each query must strictly follow the format: "[Target Business Category]: [Business Attributes, Related User Preferences]".',
+    },
+
+        'seq_rec_recent2': {
+    'head': 'You are an intelligent shopping assistant that helps predict what users may want to purchase next. Below is a list of items a user has purchased recently.\n' +\
+                'Your task is to infer one or multiple kinds of products they may want to buy next, and generate relevant query terms that can be used to search for these potential products.\n' +\
+                'Below is the user purchase history:\n',
+    'tail': 'Based on this user\'s purchase history, generate relevant query terms that can be used to search for these potential products.\n' +\
+            'The response should be start with "Considering the user\'s recent purchase of [Item Name], ..."',
+    },
+
+    'seq_rec_recent2': {
+        'head': 'You are an intelligent local guide that helps predict what businesses users may want to visit next. Below is a list of places a user has visited recently.\n' +
+                'Your task is to infer one or multiple kinds of businesses they may want to visit next, and generate relevant query terms that can be used to search for these potential places.\n' +
+                'Below is the user visit history:\n',
+        'tail': 'Based on this user\'s visit history, generate multiple relevant query terms that can be used to search for these potential businesses.\n' +
+                'The response should start with "Considering the user\'s recent visit to [Business Name], ..."',
     },
 }

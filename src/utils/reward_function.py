@@ -12,6 +12,36 @@ from pathlib import Path
 import argparse
 import nltk
 from nltk.corpus import stopwords
+import re
+
+
+def extract_query_from_tags(text: str, tag: str = "query") -> str:
+    """
+    텍스트에서 특정 XML-like 태그 내부의 내용을 추출
+    태그가 없으면 원본 텍스트 반환
+    
+    Args:
+        text: 입력 텍스트
+        tag: 추출할 태그 이름 (default: "query")
+        
+    Returns:
+        태그 내부의 텍스트, 태그가 없으면 원본 텍스트
+        
+    Example:
+        >>> text = "<thinking>...</thinking><query>camping gear</query>"
+        >>> extract_query_from_tags(text)
+        "camping gear"
+    """
+    # 정규식으로 태그 내용 추출 (대소문자 무시, 줄바꿈 포함)
+    pattern = f"<{tag}>(.*?)</{tag}>"
+    match = re.search(pattern, text, re.IGNORECASE | re.DOTALL)
+    
+    if match:
+        # 태그 내용 추출 및 앞뒤 공백 제거
+        return match.group(1).strip()
+    else:
+        # 태그가 없으면 원본 텍스트 반환
+        return text
 
 
 def calculate_dcg(relevance_scores: torch.Tensor, k: Optional[int] = None) -> torch.Tensor:
@@ -408,6 +438,7 @@ class RecRewardFrunction:
     ) -> torch.Tensor:
         """
         TRL 호환 리워드 함수
+        <query> 태그가 있는 경우 태그 내부의 텍스트만 사용
         
         Args:
             generated_texts: [batch_size] 생성된 텍스트
@@ -418,15 +449,18 @@ class RecRewardFrunction:
         Returns:
             rewards: [batch_size] 리워드 값
         """
+        # <query> 태그가 있으면 추출, 없으면 원본 사용
+        processed_texts = [extract_query_from_tags(text, tag="query") for text in generated_texts]
+        
         # add target text to generated_texts
         if self.test_target:
-            generated_texts = [self.item_metadata[target] + "\n" + generated_text for generated_text, target in zip(generated_texts, targets)]  
+            processed_texts = [self.item_metadata[target] + "\n" + processed_text for processed_text, target in zip(processed_texts, targets)]  
 
         # 1. RetrievalService를 통해 유사도 점수 계산
         use_negatives_only = neg_items is not None
         
         scores_ref = self.retrieval_service.calculate_reward.remote(
-            generated_texts,
+            processed_texts,
             data_name=self.data_name,
             targets=targets if use_negatives_only else None,
             neg_items=neg_items,
@@ -759,6 +793,7 @@ class SimilarHistoryItemMentionReward:
     ) -> List[float]:
         """
         생성된 텍스트에서 유사한 히스토리 아이템의 title 언급 여부를 확인하여 보상
+        <query> 태그가 있는 경우 태그 내부의 텍스트만 검사
         
         Args:
             generated_texts: [batch_size] 생성된 텍스트
@@ -776,6 +811,9 @@ class SimilarHistoryItemMentionReward:
         for gen_text, target_id, history_ids, user_id in zip(generated_texts, targets, histories, user_ids):
             reward = 0.0
             
+            # <query> 태그가 있으면 추출, 없으면 원본 사용
+            processed_text = extract_query_from_tags(gen_text, tag="query")
+            
             # 가장 유사한 히스토리 아이템 찾기
             most_similar_item_id = self._get_most_similar_history_item(user_id)
             
@@ -784,13 +822,13 @@ class SimilarHistoryItemMentionReward:
                 item_title = self.item_metadata[str(most_similar_item_id)]["title"]
                 first_three_words = self._get_first_three_words(item_title)
                 
-                # 생성된 텍스트에 첫 3단어가 포함되어 있는지 확인 (대소문자 무시)
-                gen_text_lower = gen_text.lower()
-                if first_three_words in gen_text_lower:
+                # 처리된 텍스트에 첫 3단어가 포함되어 있는지 확인 (대소문자 무시)
+                processed_text_lower = processed_text.lower()
+                if first_three_words in processed_text_lower:
                     if self.use_position_weight:
                         # 위치 기반 가중치 적용
-                        position = gen_text_lower.find(first_three_words)
-                        text_length = len(gen_text_lower)
+                        position = processed_text_lower.find(first_three_words)
+                        text_length = len(processed_text_lower)
                         weight = self._calculate_position_weight(position, text_length)
                         reward = 1.0 * weight
                     else:
@@ -913,6 +951,7 @@ class MetadataMentionReward:
         """
         생성된 텍스트에서 타겟 아이템의 메타데이터 언급도를 평가하여 보상
         히스토리 아이템의 메타데이터 중 타겟에 없는 단어 언급시 패널티 적용
+        <query> 태그가 있는 경우 태그 내부의 텍스트만 검사
         
         Args:
             generated_texts: [batch_size] 생성된 텍스트
@@ -925,6 +964,9 @@ class MetadataMentionReward:
         rewards = []
         
         for idx, (gen_text, target_id) in enumerate(zip(generated_texts, targets)):
+            # <query> 태그가 있으면 추출, 없으면 원본 사용
+            processed_text = extract_query_from_tags(gen_text, tag="query")
+            
             # 타겟 아이템의 메타데이터 단어
             target_words = self.item_metadata_words.get(target_id, set())
             
@@ -932,8 +974,8 @@ class MetadataMentionReward:
                 rewards.append(0.0)
                 continue
             
-            # 생성된 텍스트에서 단어 추출
-            gen_words = self._extract_words(gen_text)
+            # 처리된 텍스트에서 단어 추출
+            gen_words = self._extract_words(processed_text)
             
             # 메타데이터 단어가 생성된 텍스트에 몇 개나 언급되었는지 카운트
             matched_words = target_words.intersection(gen_words)
@@ -963,12 +1005,146 @@ class MetadataMentionReward:
                 reward = reward - penalty
                 reward = max(reward, 0.0)
             
-            # 길이 패널티 적용: 텍스트가 길수록 리워드를 낮춤
-            text_length = len(gen_text.split())
+            # 길이 패널티 적용: 처리된 텍스트 길이 기준
+            text_length = len(processed_text.split())
             if text_length > self.min_length:
                 # length_factor: 텍스트가 길수록 작아짐 (0~1)
                 length_factor = 1.0 / (1.0 + self.length_penalty_alpha * (text_length - self.min_length) / self.min_length)
                 reward = reward * length_factor
+            
+            rewards.append(reward)
+        
+        return rewards
+
+
+class FormatComplianceReward:
+    """
+    생성된 텍스트가 특정 XML-like 포맷을 준수하는지 확인하는 리워드 함수
+    
+    요구 포맷:
+    <thinking>...</thinking>
+    <window>...</window>
+    <items>...</items>
+    <query>...</query>
+    
+    각 태그가 존재하고 올바르게 열리고 닫히면 부분 점수 부여
+    """
+    
+    def __init__(
+        self,
+        required_tags: List[str] = None,
+        reward_per_tag: float = 0.25,
+        strict_order: bool = False,
+        case_sensitive: bool = False,
+    ):
+        """
+        Args:
+            required_tags: 필수 태그 리스트 (default: ["thinking", "window", "items", "query"])
+            reward_per_tag: 각 태그당 보상 점수 (default: 0.25, 4개 태그 * 0.25 = 1.0)
+            strict_order: 태그 순서를 엄격하게 체크할지 여부 (default: False)
+            case_sensitive: 대소문자 구분 여부 (default: False)
+        """
+        self.__name__ = "FormatComplianceReward"
+        
+        if required_tags is None:
+            self.required_tags = ["thinking", "window", "items", "query"]
+        else:
+            self.required_tags = required_tags
+        
+        self.reward_per_tag = reward_per_tag
+        self.strict_order = strict_order
+        self.case_sensitive = case_sensitive
+        
+        print(f"✓ FormatComplianceReward initialized")
+        print(f"  - Required tags: {self.required_tags}")
+        print(f"  - Reward per tag: {self.reward_per_tag}")
+        print(f"  - Strict order: {self.strict_order}")
+        print(f"  - Case sensitive: {self.case_sensitive}")
+        print(f"  - Max reward: {len(self.required_tags) * self.reward_per_tag}")
+    
+    def _check_tag_exists(self, text: str, tag: str) -> bool:
+        """
+        태그가 올바르게 열리고 닫히는지 확인
+        
+        Args:
+            text: 검사할 텍스트
+            tag: 태그 이름 (예: "thinking")
+            
+        Returns:
+            True if both opening and closing tags exist, False otherwise
+        """
+        if not self.case_sensitive:
+            text = text.lower()
+            tag = tag.lower()
+        
+        open_tag = f"<{tag}>"
+        close_tag = f"</{tag}>"
+        
+        return open_tag in text and close_tag in text
+    
+    def _check_tag_order(self, text: str) -> bool:
+        """
+        태그가 올바른 순서로 나타나는지 확인
+        
+        Args:
+            text: 검사할 텍스트
+            
+        Returns:
+            True if tags appear in correct order, False otherwise
+        """
+        if not self.case_sensitive:
+            text = text.lower()
+        
+        last_position = -1
+        
+        for tag in self.required_tags:
+            open_tag = f"<{tag}>"
+            if not self.case_sensitive:
+                tag = tag.lower()
+            
+            position = text.find(open_tag)
+            
+            if position == -1:
+                return False
+            
+            if position < last_position:
+                return False
+            
+            last_position = position
+        
+        return True
+    
+    def __call__(
+        self,
+        generated_texts: List[str],
+        **kwargs
+    ) -> List[float]:
+        """
+        생성된 텍스트의 포맷 준수도를 평가하여 보상
+        
+        Args:
+            generated_texts: [batch_size] 생성된 텍스트
+            
+        Returns:
+            rewards: [batch_size] 보상 값 (0.0 ~ max_reward)
+        """
+        rewards = []
+        
+        for gen_text in generated_texts:
+            reward = 0.0
+            
+            # 1. 각 태그가 존재하는지 확인
+            valid_tags = 0
+            for tag in self.required_tags:
+                if self._check_tag_exists(gen_text, tag):
+                    valid_tags += 1
+                    reward += self.reward_per_tag
+            
+            # 2. 엄격한 순서 체크 (옵션)
+            if self.strict_order and valid_tags > 0:
+                if not self._check_tag_order(gen_text):
+                    # 순서가 틀리면 보상을 절반으로 감소
+                    reward = reward * 0.5
             
             rewards.append(reward)
         
@@ -1067,6 +1243,32 @@ class LocalEmbeddingRewardFunction:
             self.proxy_label_coef = 0
             self.proxy_label_cutoff = 0.0
         
+        # Anchor-Guided GRPO 파라미터
+        if hasattr(args, "anchor_reward"):
+            self.anchor_reward = args.anchor_reward
+            self.anchor_coef = args.anchor_coef
+            self.anchor_radius_start = args.anchor_radius_start
+            self.anchor_radius_end = args.anchor_radius_end
+            self.anchor_penalty_mode = args.anchor_penalty_mode
+            self.anchor_penalty_value = args.anchor_penalty_value
+        else:
+            self.anchor_reward = False
+            self.anchor_coef = 1.0
+            self.anchor_radius_start = 0.5
+            self.anchor_radius_end = 1.0
+            self.anchor_penalty_mode = "soft"
+            self.anchor_penalty_value = -1.0
+        
+        # Adaptive Threshold Reward 파라미터
+        if hasattr(args, "adaptive_threshold_reward"):
+            self.adaptive_threshold_reward = args.adaptive_threshold_reward
+            self.adaptive_threshold_coef = args.adaptive_threshold_coef
+            self.adaptive_tau_min = args.adaptive_tau_min
+        else:
+            self.adaptive_threshold_reward = False
+            self.adaptive_threshold_coef = 1.0
+            self.adaptive_tau_min = 0.0
+        
         # Training 관련 파라미터
         self.max_steps = args.max_steps
         
@@ -1075,6 +1277,8 @@ class LocalEmbeddingRewardFunction:
         self.last_proxy_label_rewards = None
         self.last_target_emb_rewards = None
         self.last_infonce_rewards = None
+        self.last_anchor_rewards = None
+        self.last_adaptive_threshold_rewards = None
         
         print(f"💰 Reward configuration:")
         print(f"  - Reward type: {self.reward_type}")
@@ -1110,6 +1314,21 @@ class LocalEmbeddingRewardFunction:
             print(f"    → Items with similarity < {self.proxy_label_cutoff} will be excluded from proxy labels")
             print(f"  - Use top-{self.proxy_k} similar items as soft labels with similarity-weighted NDCG")
             print(f"  - Final reward = base_reward + proxy_label_coef * proxy_label_ndcg")
+        if self.anchor_reward:
+            print(f"  - Anchor-Guided GRPO (AG-GRPO): ENABLED")
+            print(f"  - Anchor coefficient: {self.anchor_coef}")
+            print(f"  - Anchor radius: {self.anchor_radius_start} → {self.anchor_radius_end} (curriculum learning)")
+            print(f"  - Penalty mode: {self.anchor_penalty_mode}")
+            if self.anchor_penalty_mode == "hard":
+                print(f"  - Hard penalty value: {self.anchor_penalty_value}")
+            print(f"  - Reward based on similarity with last item (anchor) embedding")
+            print(f"  - Gradually expands exploration radius as training progresses")
+        if self.adaptive_threshold_reward:
+            print(f"  - Adaptive Threshold Reward: ENABLED")
+            print(f"  - Adaptive threshold coefficient: {self.adaptive_threshold_coef}")
+            print(f"  - Minimum threshold (tau_min): {self.adaptive_tau_min}")
+            print(f"  - Uses dynamic threshold based on historical item similarity (S_base)")
+            print(f"  - Reward = 1 if CosSim(query, target) > max(tau_min, S_base), else 0")
         
         # 임베딩 모델 로드
         print(f"🤖 Loading embedding model: {args.emb_model_name}")
@@ -1183,6 +1402,20 @@ class LocalEmbeddingRewardFunction:
             print(f"✓ Prepared target embeddings for {len(uid_2_target)} users")
         else:
             self.target_embeddings = None
+        
+        # Last item (anchor) embeddings 준비 (anchor_reward 사용 시)
+        if self.anchor_reward:
+            self.last_item_embeddings = self._prepare_last_item_embeddings()
+            print(f"✓ Prepared last item (anchor) embeddings for anchor-guided exploration")
+        else:
+            self.last_item_embeddings = None
+        
+        # History items 준비 (adaptive_threshold_reward 사용 시)
+        if self.adaptive_threshold_reward:
+            self.user_history_items = self._prepare_user_history_items()
+            print(f"✓ Prepared user history items for adaptive threshold reward")
+        else:
+            self.user_history_items = None
         
         # 아이템 인기도 계산 (train set에서)
         # Novelty 또는 Popularity reward 사용 시 필요
@@ -1268,6 +1501,83 @@ class LocalEmbeddingRewardFunction:
             target_embeddings[uid] = self.item_embeddings[target_id]
         
         return target_embeddings
+    
+    def _prepare_last_item_embeddings(self) -> torch.Tensor:
+        """
+        각 사용자의 마지막 아이템 (앵커) 임베딩을 준비
+        sequential_data.txt에서 validation set 기준 마지막 아이템 읽기
+        
+        Returns:
+            last_item_embeddings: [max_uid+1, emb_dim] 각 사용자의 마지막 아이템 임베딩
+        """
+        print(f"📦 Preparing last item (anchor) embeddings from sequential data...")
+        
+        sequential_file = f"data/{self.data_name}/sequential_data.txt"
+        
+        # 사용자별 마지막 아이템 ID 수집
+        uid_2_last_item = {}
+        max_uid = 0
+        
+        with open(sequential_file, 'r') as f:
+            for line in f:
+                parts = [int(p) for p in line.strip().split()]
+                user_id = parts[0]
+                last_item_id = parts[-3]  # 마지막 아이템
+                uid_2_last_item[user_id] = last_item_id
+                max_uid = max(max_uid, user_id)
+        
+        # 임베딩 텐서 초기화
+        emb_dim = self.item_embeddings.shape[1]
+        last_item_embeddings = torch.zeros(max_uid + 1, emb_dim, device=self.device)
+        
+        # 마지막 아이템 임베딩 채우기
+        for uid, last_item_id in uid_2_last_item.items():
+            last_item_embeddings[uid] = self.item_embeddings[last_item_id]
+        
+        print(f"  Total users with last item: {len(uid_2_last_item)}")
+        print(f"  Max user ID: {max_uid}")
+        
+        return last_item_embeddings
+    
+    def _prepare_user_history_items(self) -> Dict[int, torch.Tensor]:
+        """
+        각 사용자의 과거 구매 아이템 목록을 준비 (adaptive threshold reward용)
+        sequential_data.txt에서 train set history 읽기
+        
+        Returns:
+            user_history_items: Dict[user_id, history_item_ids_tensor]
+        """
+        print(f"📦 Preparing user history items from sequential data...")
+        
+        sequential_file = f"data/{self.data_name}/sequential_data.txt"
+        
+        # 사용자별 히스토리 아이템 수집
+        user_history_items = {}
+        
+        with open(sequential_file, 'r') as f:
+            for line in f:
+                parts = [int(p) for p in line.strip().split()]
+                user_id = parts[0]
+                history = parts[1:-3]  # Train set의 history
+                
+                # 히스토리가 비어있으면 스킵
+                if len(history) == 0:
+                    continue
+                
+                # 텐서로 변환하여 저장
+                user_history_items[user_id] = torch.tensor(history, dtype=torch.long, device=self.device)
+        
+        print(f"  Total users with history: {len(user_history_items)}")
+        
+        # 통계 출력
+        if len(user_history_items) > 0:
+            history_lengths = [len(h) for h in user_history_items.values()]
+            avg_length = sum(history_lengths) / len(history_lengths)
+            min_length = min(history_lengths)
+            max_length = max(history_lengths)
+            print(f"  History length - Min: {min_length}, Max: {max_length}, Avg: {avg_length:.2f}")
+        
+        return user_history_items
     
     def _compute_item_popularity(
         self, 
@@ -1360,6 +1670,7 @@ class LocalEmbeddingRewardFunction:
     def _encode_texts(self, generated_texts: List[str]) -> torch.Tensor:
         """
         생성된 텍스트를 임베딩으로 변환
+        <query> 태그가 있는 경우 태그 내부의 텍스트만 사용
         
         Args:
             generated_texts: [batch_size] 생성된 텍스트
@@ -1367,8 +1678,11 @@ class LocalEmbeddingRewardFunction:
         Returns:
             embeddings: [batch_size, emb_dim] 임베딩
         """
+        # <query> 태그가 있으면 추출, 없으면 원본 사용
+        processed_texts = [extract_query_from_tags(text, tag="query") for text in generated_texts]
+        
         embeddings = self.emb_model.encode(
-            generated_texts,
+            processed_texts,
             convert_to_tensor=True,
             show_progress_bar=False,
             device=self.device,
@@ -1698,6 +2012,137 @@ class LocalEmbeddingRewardFunction:
         
         return infonce_rewards
     
+    def _compute_anchor_reward(
+        self,
+        query_embeddings: torch.Tensor,
+        user_ids: torch.Tensor,
+        current_step: Optional[int] = None,
+    ) -> torch.Tensor:
+        """
+        Anchor-Guided GRPO 리워드 계산
+        마지막 아이템 임베딩과의 유사도를 기반으로 리워드 계산
+        동적 반경(radius) 제어: 학습 초기에는 좁은 반경, 후기에는 넓은 반경
+        
+        Args:
+            query_embeddings: [batch_size, emb_dim] 쿼리 임베딩
+            user_ids: [batch_size] 사용자 ID
+            current_step: 현재 학습 step (None이면 중간값 사용)
+            
+        Returns:
+            rewards: [batch_size] 앵커 리워드
+                    soft mode: similarity (반경 내외 모두 유사도 리워드)
+                    hard mode: similarity if in radius, else penalty_value
+        """
+        # L2 정규화 (코사인 유사도를 위해)
+        query_embeddings = torch.nn.functional.normalize(query_embeddings, p=2, dim=1)
+        
+        # 마지막 아이템 임베딩 가져오기
+        last_item_embs = self.last_item_embeddings[user_ids]  # [batch_size, emb_dim]
+        last_item_embs = torch.nn.functional.normalize(last_item_embs, p=2, dim=1)
+        
+        # 코사인 유사도 계산 (similarity ∈ [-1, 1])
+        similarities = (query_embeddings * last_item_embs).sum(dim=1)  # [batch_size]
+        
+        # # 동적 반경 계산 (curriculum learning)
+        # if current_step is not None:
+        #     # 학습 진행도에 따라 반경 선형 증가
+        #     progress = min(1.0, current_step / max(1, self.max_steps))
+        #     current_radius = self.anchor_radius_start + progress * (self.anchor_radius_end - self.anchor_radius_start)
+        # else:
+        #     # Step 정보가 없으면 중간값 사용
+        current_radius = (self.anchor_radius_start + self.anchor_radius_end) / 2.0
+        
+        if self.anchor_penalty_mode == "soft":
+            # Soft mode: 유사도를 그대로 리워드로 사용
+            # 반경 내외 구분 없이, 유사도가 높을수록 높은 리워드
+            rewards = similarities
+        elif self.anchor_penalty_mode == "hard":
+            # Hard mode: 반경 내에 있으면 유사도 리워드, 벗어나면 페널티
+            # current_radius를 threshold로 사용
+            in_radius = similarities >= current_radius  # [batch_size] boolean
+            rewards = torch.where(in_radius, similarities, torch.tensor(self.anchor_penalty_value, device=self.device))
+        else:
+            raise ValueError(f"Unknown anchor_penalty_mode: {self.anchor_penalty_mode}")
+        
+        return rewards
+    
+    def _compute_adaptive_threshold_reward(
+        self,
+        query_embeddings: torch.Tensor,
+        user_ids: torch.Tensor,
+    ) -> torch.Tensor:
+        """
+        적응형 임계값 보상 (Adaptive Threshold Reward) 계산
+        
+        전략: 과거 구매 아이템들과의 평균 유사도(S_base)를 동적 임계값으로 사용
+        
+        수식:
+            S_base = mean(CosSim(query, history_items))
+            threshold = max(tau_min, S_base)
+            R = 1 if CosSim(query, target) > threshold else 0
+        
+        의미: "적어도 과거에 샀던 물건들보다는 정답에 더 비슷해야 정답으로 인정해주겠다"
+        
+        Args:
+            query_embeddings: [batch_size, emb_dim] 쿼리 임베딩
+            user_ids: [batch_size] 사용자 ID
+            
+        Returns:
+            rewards: [batch_size] 적응형 임계값 리워드 (0 또는 1)
+        """
+        batch_size = len(user_ids)
+        rewards = torch.zeros(batch_size, device=self.device)
+        
+        # L2 정규화 (코사인 유사도를 위해)
+        query_embeddings_norm = torch.nn.functional.normalize(query_embeddings, p=2, dim=1)
+        
+        # 타겟 아이템 ID 가져오기
+        if self.use_full_item_pool:
+            target_item_ids = torch.tensor(
+                [self.uid_2_target[uid] for uid in user_ids],
+                device=self.device
+            )  # [batch_size]
+        else:
+            batch_candidate_tensor = self.candidate_tensor[user_ids]  # [batch_size, k]
+            target_item_ids = batch_candidate_tensor[:, 0]  # [batch_size]
+        
+        # 타겟 아이템 임베딩 가져오기
+        target_item_embs = self.item_embeddings[target_item_ids]  # [batch_size, emb_dim]
+        target_item_embs_norm = torch.nn.functional.normalize(target_item_embs, p=2, dim=1)
+        
+        # 쿼리와 타겟 아이템의 유사도 계산
+        query_target_similarity = (query_embeddings_norm * target_item_embs_norm).sum(dim=1)  # [batch_size]
+        
+        for i, uid in enumerate(user_ids):
+            uid_item = uid.item() if isinstance(uid, torch.Tensor) else uid
+            
+            # 1. 과거 구매 아이템들의 임베딩 가져오기
+            if uid_item not in self.user_history_items:
+                # 히스토리가 없으면 tau_min을 임계값으로 사용
+                threshold = self.adaptive_tau_min
+            else:
+                history_item_ids = self.user_history_items[uid_item]  # [history_len]
+                
+                # 2. 히스토리 아이템 임베딩 가져오기
+                history_item_embs = self.item_embeddings[history_item_ids]  # [history_len, emb_dim]
+                history_item_embs_norm = torch.nn.functional.normalize(history_item_embs, p=2, dim=1)
+                
+                # 3. 쿼리와 히스토리 아이템들의 유사도 계산 후 평균 구하기 (S_base)
+                query_history_similarities = torch.mm(
+                    query_embeddings_norm[i].unsqueeze(0),  # [1, emb_dim]
+                    history_item_embs_norm.T  # [emb_dim, history_len]
+                ).squeeze(0)  # [history_len]
+                
+                s_base = query_history_similarities.mean().item()
+                
+                # 4. 동적 임계값 = max(tau_min, S_base)
+                threshold = max(self.adaptive_tau_min, s_base)
+            
+            # 5. 쿼리와 정답 아이템의 유사도가 임계값보다 큰 만큼 리워드
+            rewards[i] = max(0, query_target_similarity[i].item() - threshold)
+        
+        return rewards
+    
     def __call__(
         self,
         generated_texts: List[str],
@@ -1834,6 +2279,28 @@ class LocalEmbeddingRewardFunction:
         else:
             self.last_infonce_rewards = None
         
+        # Anchor-Guided GRPO 리워드 추가
+        if self.anchor_reward and self.last_item_embeddings is not None:
+            # trainer_state에서 현재 step 정보 가져오기
+            trainer_state = kwargs.get("trainer_state", None)
+            current_step = None
+            if trainer_state is not None and hasattr(trainer_state, "global_step"):
+                current_step = trainer_state.global_step
+            
+            anchor_rewards = self._compute_anchor_reward(query_embeddings, user_ids, current_step)
+            self.last_anchor_rewards = anchor_rewards.detach().cpu()
+            rewards = rewards + self.anchor_coef * anchor_rewards
+        else:
+            self.last_anchor_rewards = None
+        
+        # Adaptive Threshold 리워드 추가
+        if self.adaptive_threshold_reward and self.user_history_items is not None:
+            adaptive_threshold_rewards = self._compute_adaptive_threshold_reward(query_embeddings, user_ids)
+            self.last_adaptive_threshold_rewards = adaptive_threshold_rewards.detach().cpu()
+            rewards = rewards + self.adaptive_threshold_coef * adaptive_threshold_rewards
+        else:
+            self.last_adaptive_threshold_rewards = None
+        
         # 정규화 (optional)
         if self.normalize and rewards.std() > 0:
             rewards = (rewards - rewards.mean()) / (rewards.std() + 1e-8)
@@ -1851,6 +2318,8 @@ class LocalEmbeddingRewardFunction:
                 - "proxy_label_reward": Proxy label 리워드 (사용 시)
                 - "target_emb_reward": Target embedding 유사도 리워드 (사용 시)
                 - "infonce_reward": InfoNCE 리워드 (사용 시)
+                - "anchor_reward": Anchor-Guided GRPO 리워드 (사용 시)
+                - "adaptive_threshold_reward": Adaptive Threshold 리워드 (사용 시)
         """
         breakdown = {}
         
@@ -1865,5 +2334,11 @@ class LocalEmbeddingRewardFunction:
         
         if self.last_infonce_rewards is not None:
             breakdown["infonce_reward"] = self.last_infonce_rewards
+        
+        if self.last_anchor_rewards is not None:
+            breakdown["anchor_reward"] = self.last_anchor_rewards
+        
+        if self.last_adaptive_threshold_rewards is not None:
+            breakdown["adaptive_threshold_reward"] = self.last_adaptive_threshold_rewards
         
         return breakdown

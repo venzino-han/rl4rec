@@ -2,11 +2,11 @@
 
 max_steps=1000
 dataset_names=(beauty toys sports yelp)
-dataset_names=(yelp)
-device=7
+device=5
 PROMPT_TYPE="seq_rec_new"
 PROMPT_TYPE="seq_rec_new_2"
 PROMPT_TYPE="seq_rec_recent"
+PROMPT_TYPE="seq_rec_recent2"
 # PROMPT_TYPE="seq_rec"
 
 EVAL_BATCH_SIZE=64

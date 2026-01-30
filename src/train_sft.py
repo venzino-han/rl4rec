@@ -381,6 +381,8 @@ def parse_arguments():
                         help="Include features in prompt")
     parser.add_argument("--use_date", action="store_true", default=True,
                         help="Include purchase date information in prompt")
+    parser.add_argument("--use_relative_date", action="store_true",
+                        help="Use relative date format (D-N) based on target purchase date instead of absolute dates")
     parser.add_argument("--use_last_item", action="store_true", default=True,
                         help="Emphasize last item in prompt")
     parser.add_argument("--emphasize_recent_item", action="store_true",

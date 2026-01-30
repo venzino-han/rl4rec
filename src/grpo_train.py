@@ -38,6 +38,7 @@ from utils.reward_function import (
     LocalEmbeddingRewardFunction,
     SimilarHistoryItemMentionReward,
     MetadataMentionReward,
+    FormatComplianceReward,
 )
 from utils.dataset import create_dataloaders
 from evaluator import RecommendationEvaluator
@@ -222,6 +223,14 @@ class GRPOTrainerWrapper:
                 repetition_penalty=1.0,
                 top_p=0.95,
 
+                # Save
+                # load_best_model_at_end=True,
+                # metric_for_best_model="reward",
+                # greater_is_better=True,
+                # eval_strategy="steps",
+                save_only_model=True,
+                save_strategy="steps",
+
                 # vLLM
                 use_vllm=True,
                 vllm_mode="colocate",
@@ -314,6 +323,19 @@ class GRPOTrainerWrapper:
                 )
                 reward_funcs.append(metadata_reward_fn)
             
+            # 6. Format Compliance Reward (옵션) - XML-like 포맷 준수
+            if args.use_format_reward:
+                print(f"  [6] Format Compliance Reward: +{args.format_reward_per_tag} per valid tag")
+                print(f"      Required tags: {args.format_required_tags}")
+                print(f"      Strict order: {args.format_strict_order}")
+                format_reward_fn = FormatComplianceReward(
+                    required_tags=args.format_required_tags,
+                    reward_per_tag=args.format_reward_per_tag,
+                    strict_order=args.format_strict_order,
+                    case_sensitive=args.format_case_sensitive,
+                )
+                reward_funcs.append(format_reward_fn)
+            
             print(f"  Total reward functions: {len(reward_funcs)}")
             
             # reward_funcs가 1개면 단일 함수로, 2개 이상이면 리스트로 전달
@@ -382,8 +404,17 @@ class GRPOTrainerWrapper:
 
         if self.args.num_epochs > 0:
             self.grpo_trainer.train()
-        print("=" * 80)
-        print("✓ Training completed!")        
+            print("=" * 80)
+            print("✓ Training completed!")
+
+            # save best model (after training, best model is loaded into grpo_trainer.model)
+            os.makedirs(self.args.final_checkpoint_dir, exist_ok=True)
+            self.grpo_trainer.model.save_pretrained(self.args.final_checkpoint_dir)
+            print(f"✓ Best model saved: {self.args.final_checkpoint_dir}")
+        else:
+            print("=" * 80)
+            print("⚠️  Training skipped (num_epochs=0), no model saved")
+        
         # 최종 테스트 평가
         # test_metrics = self.evaluate_final_metrics(self.test_dataset, split="test")
         
@@ -426,6 +457,8 @@ def parse_args():
     parser.add_argument("--use_description", action="store_true", help="Include description in prompt")
     parser.add_argument("--use_features", action="store_true", help="Include features in prompt")
     parser.add_argument("--use_date", action="store_true", default=True, help="Include purchase date information in prompt")
+    parser.add_argument("--use_relative_date", action="store_true", 
+                        help="Use relative date format (D-N) based on target purchase date instead of absolute dates")
     parser.add_argument("--use_last_item", action="store_true", default=True, help="Emphasize last item")
     parser.add_argument("--emphasize_recent_item", action="store_true",
                         help="Emphasize recent purchase item with detailed information including purchase date ('This user's most recent purchase is...' format)")
@@ -499,6 +532,22 @@ def parse_args():
                         help="Minimum text length (in words) before length penalty applies (default: 10)")
     parser.add_argument("--history_penalty_weight", type=float, default=0.01,
                         help="Penalty weight for mentioning history metadata words not in target (default: 0.5)")
+    
+    # Format Compliance Reward (XML-like 포맷 준수)
+    parser.add_argument("--use_format_reward", action="store_true",
+                        help="Use format compliance reward. "
+                             "Rewards generated text that follows the required XML-like format structure. "
+                             "Example: <thinking>...</thinking> <window>...</window> <items>...</items> <query>...</query>")
+    parser.add_argument("--format_required_tags", type=str, nargs="+", default=["thinking", "window", "items", "query"],
+                        help="List of required XML-like tags (default: thinking window items query)")
+    parser.add_argument("--format_reward_per_tag", type=float, default=0.25,
+                        help="Reward per valid tag (default: 0.25). "
+                             "With 4 tags, max reward = 1.0")
+    parser.add_argument("--format_strict_order", action="store_true",
+                        help="Enforce strict tag ordering. "
+                             "If enabled and tags are out of order, reward is halved.")
+    parser.add_argument("--format_case_sensitive", action="store_true",
+                        help="Make tag matching case-sensitive (default: False)")
 
     
     # Novelty Reward (popularity-based reward)
@@ -556,6 +605,37 @@ def parse_args():
                              "If None, automatically constructs path from data_name, emb_type, and emb_model_name. "
                              "Example: data_emb/beauty_proxy_labels_k1000_random_th0.3_item_preference_1024_gemma-3-4b-it_mxbai-embed-large-v1.json")
     
+    # Anchor-Guided GRPO (AG-GRPO)
+    parser.add_argument("--anchor_reward", action="store_true",
+                        help="Use Anchor-Guided GRPO reward: guides exploration by anchoring to last item. "
+                             "Rewards queries similar to user's last item, with dynamic radius control.")
+    parser.add_argument("--anchor_coef", type=float, default=1.0,
+                        help="Anchor reward coefficient (weight for this reward component)")
+    parser.add_argument("--anchor_radius_start", type=float, default=0.5,
+                        help="Initial exploration radius (cosine similarity threshold) at training start. "
+                             "Lower values = narrower exploration around last item.")
+    parser.add_argument("--anchor_radius_end", type=float, default=1.0,
+                        help="Final exploration radius at training end. Gradually increases via curriculum learning.")
+    parser.add_argument("--anchor_penalty_mode", type=str, default="soft", choices=["soft", "hard"],
+                        help="Penalty mode for out-of-radius queries. "
+                             "'soft': uses similarity as reward regardless of radius. "
+                             "'hard': applies penalty if similarity < current_radius.")
+    parser.add_argument("--anchor_penalty_value", type=float, default=-1.0,
+                        help="Penalty value for hard mode when query is outside the radius")
+    
+    # Adaptive Threshold Reward
+    parser.add_argument("--adaptive_threshold_reward", action="store_true",
+                        help="Use Adaptive Threshold Reward: dynamic threshold based on historical item similarity. "
+                             "Rewards = 1 if CosSim(query, target) > max(tau_min, S_base), else 0. "
+                             "S_base = mean similarity between query and historical items. "
+                             "Enforces strict criteria: 'query must be more similar to target than to past purchases'.")
+    parser.add_argument("--adaptive_threshold_coef", type=float, default=1.0,
+                        help="Adaptive threshold reward coefficient (weight for this reward component)")
+    parser.add_argument("--adaptive_tau_min", type=float, default=0.0,
+                        help="Minimum threshold (tau_min) for adaptive threshold. "
+                             "Acts as a floor value when S_base is very low. "
+                             "threshold = max(tau_min, S_base)")
+    
     # Local Embedding-based Reward (alternative to RetrievalService)
     parser.add_argument("--use_local_embedding", action="store_true", 
                         help="Use local embedding-based reward instead of RetrievalService")
@@ -600,6 +680,8 @@ def main():
     """Main training function"""
     args = parse_args()
     args.sequential_file = f"data/{args.data_name}/sequential_data.txt"
+
+    args.eval_interval = args.save_interval
 
     # fix seed
     torch.manual_seed(args.seed)

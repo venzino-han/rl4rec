@@ -104,7 +104,7 @@ def parse_args():
     # Evaluation Settings
     parser.add_argument("--emb_batch_size", type=int, default=512,
                         help="Batch size for evaluation")
-    parser.add_argument("--eval_batch_size", type=int, default=32,
+    parser.add_argument("--eval_batch_size", type=int, default=64,
                         help="Batch size for evaluation")
     parser.add_argument("--eval_samples", type=int, default=100000,
                         help="Number of samples to evaluate (for debugging)")

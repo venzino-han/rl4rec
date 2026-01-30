@@ -2,11 +2,9 @@
 
 max_steps=1000
 dataset_names=(beauty toys sports yelp)
-dataset_names=(yelp)
 device=7
-PROMPT_TYPE="seq_rec_new"
-PROMPT_TYPE="seq_rec_new_2"
-PROMPT_TYPE="seq_rec_recent"
+PROMPT_TYPE="seq_rec_temp"
+PROMPT_TYPE="seq_rec_temp_no_thinking"
 # PROMPT_TYPE="seq_rec"
 
 EVAL_BATCH_SIZE=64
@@ -18,7 +16,7 @@ TRACKER="python3 utils/device_tracker.py"
 for seed in 42; do
 for dataset_name in ${dataset_names[@]}; do
     echo "Training ${dataset_name}..."
-    RUN_NAME="${dataset_name}_${PROMPT_TYPE}_baseline_zeroshot_seed${seed}"
+    RUN_NAME="${dataset_name}_${PROMPT_TYPE}_baseline_zeroshot_temp_seed${seed}"
     CHECKPOINT_DIR="checkpoints/$RUN_NAME"
     $TRACKER allocate $device "$RUN_NAME"
 
@@ -28,6 +26,7 @@ for dataset_name in ${dataset_names[@]}; do
         --model_name "google/gemma-3-1b-it" \
         --run_name $RUN_NAME \
         --prompt_type $PROMPT_TYPE \
+        --use_relative_date \
         --use_brand \
         --use_category \
         --emphasize_recent_item \
@@ -42,6 +41,7 @@ for dataset_name in ${dataset_names[@]}; do
         --gpu_memory_utilization 0.95 \
         --zeroshot_evaluation \
         --run_evaluation \
+        --max_new_tokens 128 \
         "$@"
 
     $TRACKER free $device

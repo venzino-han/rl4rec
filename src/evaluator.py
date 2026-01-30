@@ -13,7 +13,7 @@ from vllm import LLM, SamplingParams
 from vllm.pooling_params import PoolingParams
 from sentence_transformers import SentenceTransformer
 
-from utils.reward_function import calculate_ndcg, calculate_hit_rate
+from utils.reward_function import calculate_ndcg, calculate_hit_rate, extract_query_from_tags
 
 
 def get_last_item_text(dataset, item_metadata, use_brand=True, use_category=True):
@@ -350,6 +350,7 @@ class RecommendationEvaluator:
     def compute_embeddings(self, texts):
         """
         텍스트들에 대한 임베딩을 한번에 계산
+        <query> 태그가 있는 경우 태그 내부의 텍스트만 사용
         
         Args:
             texts: 임베딩할 텍스트 리스트
@@ -358,14 +359,18 @@ class RecommendationEvaluator:
         Returns:
             query_embeddings: 정규화된 쿼리 임베딩 [num_texts, emb_dim]
         """
-        self._load_embedding_model()        
-        print(f"🔍 Computing embeddings for {len(texts)} texts...")
+        self._load_embedding_model()
+        
+        # <query> 태그가 있으면 추출, 없으면 원본 사용
+        processed_texts = [extract_query_from_tags(text, tag="query") for text in texts]
+        
+        print(f"🔍 Computing embeddings for {len(processed_texts)} texts...")
         
         if self.use_sentence_transformers:
             # SentenceTransformer 사용
             print("🔍 Using SentenceTransformer encode...")
             query_embeddings = self.emb_llm.encode(
-                texts, 
+                processed_texts, 
                 batch_size=self.args.eval_emb_batch_size, 
                 show_progress_bar=True, 
                 convert_to_tensor=True
@@ -374,11 +379,11 @@ class RecommendationEvaluator:
         else:
             # vLLM 사용
             # add cls token
-            texts = [f"[CLS] {text}" for text in texts]
+            processed_texts_with_cls = [f"[CLS] {text}" for text in processed_texts]
 
             # Embedding 계산
             emb_outputs = self.emb_llm.encode(
-                prompts=texts,
+                prompts=processed_texts_with_cls,
                 pooling_task="embed",
                 pooling_params=self.pooling_params,
                 use_tqdm=True,
