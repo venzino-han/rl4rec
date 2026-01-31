@@ -7,6 +7,7 @@ PROMPT_TYPE="seq_rec_new"
 PROMPT_TYPE="seq_rec_new_2"
 PROMPT_TYPE="seq_rec_recent"
 PROMPT_TYPE="seq_rec_recent2"
+PROMPT_TYPE="seq_rec_anchor"
 # PROMPT_TYPE="seq_rec"
 
 EVAL_BATCH_SIZE=64
@@ -41,6 +42,8 @@ for dataset_name in ${dataset_names[@]}; do
         --max_history_len $MAX_HISTORY_LEN \
         --gpu_memory_utilization 0.95 \
         --zeroshot_evaluation \
+        --eval_samples 1000000 \
+        --max_new_tokens 512 \
         --run_evaluation \
         "$@"
 

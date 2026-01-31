@@ -6,6 +6,7 @@ dataset_names=(beauty toys sports yelp)
 device=4
 PROMPT_TYPE="seq_rec_new"
 PROMPT_TYPE="seq_rec_recent2"
+PROMPT_TYPE="seq_rec_anchor"
 
 TRACKER="python3 utils/device_tracker.py"
 
@@ -14,7 +15,7 @@ for dataset_name in ${dataset_names[@]}; do
     echo "Training ${dataset_name}..."
 for temp in 0.6 ; do
 for loss_type in dr_grpo; do
-    RUN_NAME="${dataset_name}_recent2_meta0.01_proxy100_1.0_seed${seed}_kd0.001_k1000_128_steps${max_steps}_temp${temp}_lr1e-6"
+    RUN_NAME="${dataset_name}_${PROMPT_TYPE}_meta0.01_seed${seed}_kd0.001_k1000_128_steps${max_steps}_temp${temp}_lr1e-6"
     CHECKPOINT_DIR="checkpoints/$RUN_NAME"
     FINAL_CHECKPOINT_DIR="$CHECKPOINT_DIR/checkpoint-$max_steps"
 
@@ -53,13 +54,13 @@ for loss_type in dr_grpo; do
         --use_metadata_reward \
         --metadata_base_reward 0.01 \
         --metadata_length_penalty 1.0 \
-        --metadata_min_length 8 \
+        --metadata_min_length 16 \
         --history_penalty_weight 0.001 \
-        --proxy_label_reward \
-        --proxy_k 100 \
-        --proxy_label_coef 1.0 \
-        --proxy_label_file data_emb/${dataset_name}_proxy_labels_k1000_random_th0.3_item_preference_1024_gemma-3-4b-it_mxbai-embed-large-v1.json \
         "$@"
+        # --proxy_label_reward \
+        # --proxy_k 100 \
+        # --proxy_label_coef 1.0 \
+        # --proxy_label_file data_emb/${dataset_name}_proxy_labels_k1000_random_th0.3_item_preference_1024_gemma-3-4b-it_mxbai-embed-large-v1.json \
 
     CUDA_VISIBLE_DEVICES=$device python3 src/grpo_eval.py \
         --run_name $RUN_NAME \

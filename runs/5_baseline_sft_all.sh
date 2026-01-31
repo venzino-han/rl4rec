@@ -14,21 +14,21 @@ EPOCHS=1
 LEARNING_RATE=1e-5
 MAX_HISTORY_LEN=8
 MAX_STEPS=3000
-MAX_STEPS=5000
+# MAX_STEPS=5000
 
 
 data_names=(
-    beauty
-    toys
-    sports
+    # beauty
+    # toys
+    # sports
     yelp
 )
 
 TRACKER="python3 utils/device_tracker.py"
 
-device=5
-PROMPT_TYPE="seq_rec_new"
-for seed in 22 42 62; do
+device=6
+PROMPT_TYPE="seq_rec_anchor"
+for seed in 42 ; do
 for data_name in "${data_names[@]}"; do
 RUN_NAME="bigrec_sft_${data_name}_seed${seed}_max_steps${MAX_STEPS}"
 CHECKPOINT_DIR="checkpoints/${RUN_NAME}"

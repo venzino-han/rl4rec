@@ -2,20 +2,21 @@
 
 max_steps=1000
 dataset_names=(beauty toys sports yelp)
-device=5
+device=7
 PROMPT_TYPE="seq_rec_new"
 PROMPT_TYPE="seq_rec"
+PROMPT_TYPE="seq_rec_anchor"
 # PROMPT_TYPE="seq_rec_recent"
 # PROMPT_TYPE="seq_rec_recent2"
 
 TRACKER="python3 utils/device_tracker.py"
 
-for seed in 22 42 62; do
+for seed in 42 22 62; do
 for dataset_name in ${dataset_names[@]}; do
     echo "Training ${dataset_name}..."
 for temp in 0.6 ; do
 for loss_type in dr_grpo; do
-    RUN_NAME="${dataset_name}_rec_r1_recent2_seed${seed}_k1000_128_steps${max_steps}_temp${temp}_lr1e-6"
+    RUN_NAME="${dataset_name}_rec_r1_${PROMPT_TYPE}_seed${seed}_k1000_128_steps${max_steps}_temp${temp}_lr1e-6"
     CHECKPOINT_DIR="checkpoints/$RUN_NAME"
     FINAL_CHECKPOINT_DIR="$CHECKPOINT_DIR/checkpoint-$max_steps"
 
