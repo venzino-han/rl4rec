@@ -636,6 +636,15 @@ def parse_args():
                              "Acts as a floor value when S_base is very low. "
                              "threshold = max(tau_min, S_base)")
     
+    # History Proxy Threshold Reward
+    parser.add_argument("--history_proxy_threshold_reward", action="store_true",
+                        help="Use History Proxy Threshold Reward: uses most similar history item to target as proxy. "
+                             "Pre-computes proxy = argmax_i CosSim(target, history_i) for each user. "
+                             "Reward = max(0, CosSim(query, proxy) - mean(CosSim(query, other_history))). "
+                             "Rewards query similarity to best matching history item above average baseline.")
+    parser.add_argument("--history_proxy_threshold_coef", type=float, default=0.2,
+                        help="History proxy threshold reward coefficient (weight for this reward component)")
+    
     # Local Embedding-based Reward (alternative to RetrievalService)
     parser.add_argument("--use_local_embedding", action="store_true", 
                         help="Use local embedding-based reward instead of RetrievalService")

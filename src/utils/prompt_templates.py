@@ -8,6 +8,14 @@ PROMPT_TEMPLATES = {
     'tail': 'Based on this user\'s purchase history, generate relevant query terms that can be used to search for these potential products.',
     },
 
+    'seq_rec_anchor': {
+    'head': 'You are an intelligent shopping assistant that helps predict what users may want to purchase next. Below is a list of items a user has purchased recently.\n' +\
+                'Your task is to infer one or multiple kinds of products they may want to buy next, and generate relevant query terms that can be used to search for these potential products.\n' +\
+                'Below is the user purchase history:\n',
+    'tail': 'Based on this user\'s purchase history, generate relevant query terms that can be used to search for these potential products.\n' +\
+            'Response should be start with format: "This user recently purchased [HISTORY_ITEM_NAME], which represents this user\'s latest preferences for [Specific Attributes in History] by offering [Connecting Features]".'
+    },
+
     # 'seq_rec': {
     # 'head': 'You are an intelligent shopping assistant that helps predict what users may want to purchase next. Below is a list of items a user has purchased recently.\n' +\
     #             'Your task is to infer one or multiple kinds of products they may want to buy next, and generate relevant query terms that can be used to search for these potential products.\n' +\
@@ -195,6 +203,14 @@ PROMPT_TEMPLATES_YELP = {
         'tail': 'Based on this user\'s visit history, generate multiple relevant query terms that can be used to search for these potential businesses.\n' +
                 'Each query must strictly follow the format: "[Business Category]: [Business Attributes, Related User Preferences]".\n' +
                 'The response should start with "Considering the user\'s recent visit to [Business Name], ..."',
+    },
+
+    'seq_rec_anchor': {
+        'head': 'You are an intelligent local guide that helps predict what businesses users may want to visit next. Below is a list of places a user has visited recently.\n' +
+                'Your task is to infer one or multiple kinds of businesses they may want to visit next, and generate relevant query terms that can be used to search for these potential places.\n' +
+                'Below is the user visit history:\n',
+        'tail': 'Based on this user\'s visit history, generate relevant query terms that can be used to search for these potential businesses.\n' +
+                'The response should be start with format: "This user recently visited [Visited Business Name], which represents this user\'s latest preferences for [Specific Attributes in History] by offering [Connecting Features]".',
     },
 
     # 3. "[History Item] -> Explanation -> Queries" format (Most Structured)

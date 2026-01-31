@@ -3,6 +3,7 @@
 max_steps=1000
 dataset_names=(toys sports yelp)
 dataset_names=(beauty toys sports yelp)
+dataset_names=(sports)
 device=4
 PROMPT_TYPE="seq_rec_new"
 PROMPT_TYPE="seq_rec_recent2"

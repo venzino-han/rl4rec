@@ -6,7 +6,7 @@ dataset_names=(yelp)
 device=3
 PROMPT_TYPE="seq_rec_new"
 PROMPT_TYPE="seq_rec_new_2"
-PROMPT_TYPE="seq_rec_recent"
+PROMPT_TYPE="seq_rec_anchor"
 # PROMPT_TYPE="seq_rec"
 
 EVAL_BATCH_SIZE=64

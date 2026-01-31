@@ -1269,6 +1269,14 @@ class LocalEmbeddingRewardFunction:
             self.adaptive_threshold_coef = 1.0
             self.adaptive_tau_min = 0.0
         
+        # History Proxy Threshold Reward 파라미터
+        if hasattr(args, "history_proxy_threshold_reward"):
+            self.history_proxy_threshold_reward = args.history_proxy_threshold_reward
+            self.history_proxy_threshold_coef = args.history_proxy_threshold_coef
+        else:
+            self.history_proxy_threshold_reward = False
+            self.history_proxy_threshold_coef = 1.0
+        
         # Training 관련 파라미터
         self.max_steps = args.max_steps
         
@@ -1279,6 +1287,7 @@ class LocalEmbeddingRewardFunction:
         self.last_infonce_rewards = None
         self.last_anchor_rewards = None
         self.last_adaptive_threshold_rewards = None
+        self.last_history_proxy_threshold_rewards = None
         
         print(f"💰 Reward configuration:")
         print(f"  - Reward type: {self.reward_type}")
@@ -1329,6 +1338,11 @@ class LocalEmbeddingRewardFunction:
             print(f"  - Minimum threshold (tau_min): {self.adaptive_tau_min}")
             print(f"  - Uses dynamic threshold based on historical item similarity (S_base)")
             print(f"  - Reward = 1 if CosSim(query, target) > max(tau_min, S_base), else 0")
+        if self.history_proxy_threshold_reward:
+            print(f"  - History Proxy Threshold Reward: ENABLED")
+            print(f"  - History proxy threshold coefficient: {self.history_proxy_threshold_coef}")
+            print(f"  - Uses most similar history item to target as proxy")
+            print(f"  - Reward = max(0, CosSim(query, proxy) - mean(CosSim(query, other_history)))")
         
         # 임베딩 모델 로드
         print(f"🤖 Loading embedding model: {args.emb_model_name}")
@@ -1416,6 +1430,14 @@ class LocalEmbeddingRewardFunction:
             print(f"✓ Prepared user history items for adaptive threshold reward")
         else:
             self.user_history_items = None
+        
+        # History proxy items 준비 (history_proxy_threshold_reward 사용 시)
+        if self.history_proxy_threshold_reward:
+            self.user_history_items = self._prepare_user_history_items()
+            self.user_history_proxy_items = self._prepare_user_history_proxy_items(uid_2_target)
+            print(f"✓ Prepared user history proxy items for history proxy threshold reward")
+        else:
+            self.user_history_proxy_items = None
         
         # 아이템 인기도 계산 (train set에서)
         # Novelty 또는 Popularity reward 사용 시 필요
@@ -1578,6 +1600,66 @@ class LocalEmbeddingRewardFunction:
             print(f"  History length - Min: {min_length}, Max: {max_length}, Avg: {avg_length:.2f}")
         
         return user_history_items
+    
+    def _prepare_user_history_proxy_items(self, uid_2_target: Dict[int, int]) -> Dict[int, int]:
+        """
+        각 사용자에 대해 타겟 아이템과 가장 유사한 히스토리 아이템을 사전에 계산
+        (history proxy threshold reward용)
+        
+        전략:
+        - 타겟 아이템과 각 히스토리 아이템의 코사인 유사도를 계산
+        - 가장 유사도가 높은 히스토리 아이템을 proxy로 저장
+        
+        Args:
+            uid_2_target: 사용자 ID to 타겟 아이템 ID 매핑
+        
+        Returns:
+            user_history_proxy_items: Dict[user_id, proxy_item_id]
+        """
+        print(f"📦 Pre-computing most similar history items to target for each user...")
+        
+        user_history_proxy_items = {}
+        
+        # 아이템 임베딩 정규화 (코사인 유사도 계산을 위해)
+        item_embeddings_norm = torch.nn.functional.normalize(self.item_embeddings, p=2, dim=1)
+        
+        users_with_proxy = 0
+        users_without_history = 0
+        
+        for uid, target_id in uid_2_target.items():
+            # 히스토리가 없는 경우 스킵
+            if uid not in self.user_history_items:
+                users_without_history += 1
+                continue
+            
+            history_item_ids = self.user_history_items[uid]  # [history_len]
+            
+            # 타겟 임베딩
+            target_emb = item_embeddings_norm[target_id].unsqueeze(0)  # [1, emb_dim]
+            
+            # 히스토리 임베딩
+            history_embs = item_embeddings_norm[history_item_ids]  # [history_len, emb_dim]
+            
+            # 타겟과 히스토리 아이템들의 유사도 계산
+            similarities = torch.mm(target_emb, history_embs.T).squeeze(0)  # [history_len]
+            
+            # 가장 유사도가 높은 히스토리 아이템 선택
+            max_sim_idx = similarities.argmax().item()
+            proxy_item_id = history_item_ids[max_sim_idx].item()
+            max_similarity = similarities[max_sim_idx].item()
+            
+            user_history_proxy_items[uid] = proxy_item_id
+            users_with_proxy += 1
+            
+            # 디버깅: 처음 5명의 사용자 정보 출력
+            if users_with_proxy <= 5:
+                print(f"  User {uid}: Target={target_id}, Proxy={proxy_item_id}, "
+                      f"Similarity={max_similarity:.4f}, History len={len(history_item_ids)}")
+        
+        print(f"  Total users with proxy: {users_with_proxy}")
+        print(f"  Users without history: {users_without_history}")
+        
+        return user_history_proxy_items
     
     def _compute_item_popularity(
         self, 
@@ -2143,6 +2225,82 @@ class LocalEmbeddingRewardFunction:
         
         return rewards
     
+    def _compute_history_proxy_threshold_reward(
+        self,
+        query_embeddings: torch.Tensor,
+        user_ids: torch.Tensor,
+    ) -> torch.Tensor:
+        """
+        히스토리 Proxy 임계값 보상 (History Proxy Threshold Reward) 계산
+        
+        전략: 타겟과 가장 유사한 히스토리 아이템(proxy)을 사용하여
+              나머지 히스토리 아이템들과의 평균 유사도를 임계값으로 설정
+        
+        수식:
+            proxy = argmax_i CosSim(target, history_i)
+            other_history = history - {proxy}
+            S_threshold = mean(CosSim(query, other_history))
+            R = max(0, CosSim(query, proxy) - S_threshold)
+        
+        의미: "쿼리가 과거 아이템들 평균보다 타겟과 비슷한 아이템(proxy)에 더 가까울수록 높은 보상"
+        
+        Args:
+            query_embeddings: [batch_size, emb_dim] 쿼리 임베딩
+            user_ids: [batch_size] 사용자 ID
+            
+        Returns:
+            rewards: [batch_size] 히스토리 Proxy 임계값 리워드
+        """
+        batch_size = len(user_ids)
+        rewards = torch.zeros(batch_size, device=self.device)
+        
+        # L2 정규화 (코사인 유사도를 위해)
+        query_embeddings_norm = torch.nn.functional.normalize(query_embeddings, p=2, dim=1)
+        
+        for i, uid in enumerate(user_ids):
+            uid_item = uid.item() if isinstance(uid, torch.Tensor) else uid
+            
+            # 1. Proxy 아이템 ID 가져오기 (사전에 계산됨)
+            if uid_item not in self.user_history_proxy_items:
+                # Proxy가 없으면 리워드 0
+                continue
+            
+            proxy_item_id = self.user_history_proxy_items[uid_item]
+            history_item_ids = self.user_history_items[uid_item]  # [history_len]
+            
+            # 2. Proxy 아이템 임베딩 가져오기
+            proxy_item_emb = self.item_embeddings[proxy_item_id]  # [emb_dim]
+            proxy_item_emb_norm = torch.nn.functional.normalize(proxy_item_emb.unsqueeze(0), p=2, dim=1)
+            
+            # 3. 쿼리와 Proxy 아이템의 유사도 계산
+            query_proxy_similarity = (query_embeddings_norm[i] * proxy_item_emb_norm.squeeze(0)).sum().item()
+            
+            # 4. 나머지 히스토리 아이템들과의 평균 유사도 계산 (임계값)
+            # Proxy를 제외한 히스토리 아이템들
+            other_history_mask = history_item_ids != proxy_item_id
+            other_history_item_ids = history_item_ids[other_history_mask]
+            
+            if len(other_history_item_ids) > 0:
+                # 나머지 히스토리 아이템 임베딩
+                other_history_embs = self.item_embeddings[other_history_item_ids]  # [other_len, emb_dim]
+                other_history_embs_norm = torch.nn.functional.normalize(other_history_embs, p=2, dim=1)
+                
+                # 쿼리와 나머지 히스토리 아이템들의 유사도 평균
+                query_other_similarities = torch.mm(
+                    query_embeddings_norm[i].unsqueeze(0),  # [1, emb_dim]
+                    other_history_embs_norm.T  # [emb_dim, other_len]
+                ).squeeze(0)  # [other_len]
+                
+                s_threshold = query_other_similarities.mean().item()
+            else:
+                # 히스토리가 proxy 하나뿐인 경우, 임계값 0
+                s_threshold = 0.0
+            
+            # 5. 쿼리-proxy 유사도가 임계값을 넘는 만큼 리워드
+            rewards[i] = max(0, query_proxy_similarity - s_threshold)
+        
+        return rewards
+    
     def __call__(
         self,
         generated_texts: List[str],
@@ -2301,6 +2459,14 @@ class LocalEmbeddingRewardFunction:
         else:
             self.last_adaptive_threshold_rewards = None
         
+        # History Proxy Threshold 리워드 추가
+        if self.history_proxy_threshold_reward and self.user_history_proxy_items is not None:
+            history_proxy_threshold_rewards = self._compute_history_proxy_threshold_reward(query_embeddings, user_ids)
+            self.last_history_proxy_threshold_rewards = history_proxy_threshold_rewards.detach().cpu()
+            rewards = rewards + self.history_proxy_threshold_coef * history_proxy_threshold_rewards
+        else:
+            self.last_history_proxy_threshold_rewards = None
+        
         # 정규화 (optional)
         if self.normalize and rewards.std() > 0:
             rewards = (rewards - rewards.mean()) / (rewards.std() + 1e-8)
@@ -2320,6 +2486,7 @@ class LocalEmbeddingRewardFunction:
                 - "infonce_reward": InfoNCE 리워드 (사용 시)
                 - "anchor_reward": Anchor-Guided GRPO 리워드 (사용 시)
                 - "adaptive_threshold_reward": Adaptive Threshold 리워드 (사용 시)
+                - "history_proxy_threshold_reward": History Proxy Threshold 리워드 (사용 시)
         """
         breakdown = {}
         
@@ -2340,5 +2507,8 @@ class LocalEmbeddingRewardFunction:
         
         if self.last_adaptive_threshold_rewards is not None:
             breakdown["adaptive_threshold_reward"] = self.last_adaptive_threshold_rewards
+        
+        if self.last_history_proxy_threshold_rewards is not None:
+            breakdown["history_proxy_threshold_reward"] = self.last_history_proxy_threshold_rewards
         
         return breakdown

@@ -119,6 +119,86 @@ def load_target_text_from_file(args, split="train"):
     return target_text_dict
 
 
+def load_target_text_from_rejection_sampling_csv(
+    csv_path: str,
+    max_rank_threshold: int = None,
+    min_rank_improvement: float = None,
+) -> dict:
+    """
+    Rejection sampling CSV에서 타겟 텍스트 로드
+    
+    Args:
+        csv_path: Rejection sampling CSV 파일 경로
+        max_rank_threshold: 최대 rank 임계값 (이 값 이하만 사용)
+        min_rank_improvement: 최소 rank improvement 임계값 (이 값 이상만 사용)
+    
+    Returns:
+        target_text_dict: {user_id: generated_query} 딕셔너리
+    """
+    print(f"\n📄 Loading rejection sampling results from: {csv_path}")
+    
+    # Load CSV
+    df = pd.read_csv(csv_path)
+    
+    # Check required columns
+    required_columns = ['user_id', 'generated_query', 'current_rank']
+    missing_columns = [col for col in required_columns if col not in df.columns]
+    if missing_columns:
+        raise ValueError(f"Missing required columns: {missing_columns}. Found: {df.columns.tolist()}")
+    
+    print(f"✓ Loaded {len(df)} samples from CSV")
+    print(f"  Columns: {df.columns.tolist()}")
+    
+    # Apply filters
+    original_count = len(df)
+    
+    if max_rank_threshold is not None:
+        df = df[df['current_rank'] <= max_rank_threshold]
+        print(f"  Filtered by max_rank_threshold={max_rank_threshold}: {original_count} -> {len(df)} samples")
+    
+    if min_rank_improvement is not None:
+        if 'rank_improvement' not in df.columns:
+            print("  ⚠️  Warning: rank_improvement column not found, skipping min_rank_improvement filter")
+        else:
+            df = df[df['rank_improvement'] >= min_rank_improvement]
+            print(f"  Filtered by min_rank_improvement={min_rank_improvement}: {original_count} -> {len(df)} samples")
+    
+    # Create dictionary
+    target_text_dict = {}
+    for _, row in df.iterrows():
+        user_id = int(row['user_id'])
+        generated_query = row['generated_query']
+        target_text_dict[user_id] = generated_query
+    
+    print(f"✓ Prepared target text for {len(target_text_dict)} users")
+    
+    # Show statistics
+    print(f"\n📊 Rejection Sampling Statistics:")
+    print(f"  Total samples after filtering: {len(df)}")
+    if 'current_rank' in df.columns:
+        print(f"  Current rank - Mean: {df['current_rank'].mean():.2f}, Median: {df['current_rank'].median():.0f}")
+    if 'baseline_rank' in df.columns:
+        print(f"  Baseline rank - Mean: {df['baseline_rank'].mean():.2f}, Median: {df['baseline_rank'].median():.0f}")
+    if 'rank_improvement' in df.columns:
+        print(f"  Rank improvement - Mean: {df['rank_improvement'].mean():.2f}, Median: {df['rank_improvement'].median():.2f}")
+    if 'hit@5' in df.columns:
+        print(f"  Hit@5 rate: {df['hit@5'].mean():.4f}")
+    if 'hit@10' in df.columns:
+        print(f"  Hit@10 rate: {df['hit@10'].mean():.4f}")
+    if 'hit@20' in df.columns:
+        print(f"  Hit@20 rate: {df['hit@20'].mean():.4f}")
+    
+    # Show sample
+    print(f"\n📝 Sample generated query:")
+    if len(target_text_dict) > 0:
+        sample_user_id = list(target_text_dict.keys())[0]
+        sample_query = target_text_dict[sample_user_id]
+        print(f"  User ID: {sample_user_id}")
+        print(f"  Query: {sample_query[:200]}..." if len(sample_query) > 200 else f"  Query: {sample_query}")
+    
+    return target_text_dict
+
+
 def prepare_sft_dataset(dataset, target_text_dict):
     """
     SFT를 위한 데이터셋 준비
@@ -361,8 +441,8 @@ def parse_arguments():
 
     # Target settings
     parser.add_argument("--target_type", type=str, default="from_file",
-                        choices=["from_file", "item_metadata"],
-                        help="Target text generation method: from_file (기존 파일에서 로드) 또는 item_metadata (아이템 메타데이터 사용)")
+                        choices=["from_file", "item_metadata", "rejection_sampling"],
+                        help="Target text generation method: from_file (기존 파일에서 로드), item_metadata (아이템 메타데이터 사용), rejection_sampling (rejection sampling CSV 사용)")
     parser.add_argument("--target", type=str, default="user_preference_reasoning",
                         help="Target type name (when using from_file)")
     parser.add_argument("--target_model_name", type=str, default="gemma-3-12b-it",
@@ -371,6 +451,14 @@ def parse_arguments():
                         help="Include brand in target/prompt (when using item_metadata)")
     parser.add_argument("--use_category", action="store_true", default=True,
                         help="Include category in target/prompt (when using item_metadata)")
+    
+    # Rejection Sampling settings
+    parser.add_argument("--rejection_sampling_csv", type=str, default=None,
+                        help="Path to rejection sampling CSV file (when using target_type=rejection_sampling)")
+    parser.add_argument("--max_rank_threshold", type=int, default=None,
+                        help="Maximum rank threshold - only use samples with current_rank <= this value")
+    parser.add_argument("--min_rank_improvement", type=float, default=None,
+                        help="Minimum rank improvement threshold - only use samples with rank_improvement >= this value")
     
     # Prompt Generation settings
     parser.add_argument("--prompt_type", type=str, default="seq_rec",
@@ -521,6 +609,31 @@ def main():
         print(f"  Loading target text from file (target={args.target})")
         train_target_text_dict = load_target_text_from_file(args, split="train")
         valid_target_text_dict = load_target_text_from_file(args, split="valid")
+    
+    elif args.target_type == "rejection_sampling":
+        # 옵션 3: Rejection sampling CSV에서 로드
+        if args.rejection_sampling_csv is None:
+            raise ValueError("--rejection_sampling_csv must be specified when using target_type=rejection_sampling")
+        
+        print(f"  Loading target text from rejection sampling CSV")
+        train_target_text_dict = load_target_text_from_rejection_sampling_csv(
+            csv_path=args.rejection_sampling_csv,
+            max_rank_threshold=args.max_rank_threshold,
+            min_rank_improvement=args.min_rank_improvement,
+        )
+        
+        # Valid set은 rejection sampling을 사용하지 않고 기본 방식 사용
+        # (또는 별도의 validation CSV 지정 가능하도록 확장 가능)
+        print("\n  For validation set, using item metadata")
+        valid_target_dict = generate_target_text_from_metadata(
+            valid_dataset.target_dict,
+            item_metadata,
+            use_brand=args.use_brand,
+            use_category=args.use_category,
+        )
+        valid_target_text_dict = {user_id: valid_target_dict[i] 
+                                  for i, user_id in enumerate(sorted(valid_dataset.target_dict.keys()))}
+    
     else:
         raise ValueError(f"Unknown target_type: {args.target_type}")
     
