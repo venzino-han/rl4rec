@@ -1017,6 +1017,173 @@ class MetadataMentionReward:
         return rewards
 
 
+class ItemPreferenceMentionReward:
+    """
+    타겟 아이템의 메타데이터와 아이템 간 선호도 정보를 결합하여 보상을 제공하는 리워드 함수
+    
+    특징:
+    1. data_processed/{data_name}_gemma-3-1b-it_item_item_preference.json에서 선호도 정보 로드
+    2. 기존 메타데이터(브랜드, 카테고리 등)와 선호도 텍스트를 결합하여 단어 집합 생성
+    3. 쿼리에 포함된 공통 단어가 많을수록 더 큰 보상 제공
+    4. 불용어(stopwords) 자동 제거
+    """
+    
+    def __init__(
+        self,
+        data_name: str,
+        device: str = "cuda",
+        data_dir: str = "data",
+        data_processed_dir: str = "data_processed",
+        base_reward: float = 0.1,
+        length_penalty_alpha: float = 0.5,
+        min_length: int = 10,
+    ):
+        """
+        Args:
+            data_name: 데이터셋 이름
+            device: 디바이스
+            data_dir: 메타데이터 디렉토리
+            data_processed_dir: 아이템 선호도 데이터 디렉토리
+            base_reward: 단어당 기본 보상 점수
+            length_penalty_alpha: 길이 패널티 강도 (0~1, 높을수록 긴 텍스트에 불리)
+            min_length: 최소 텍스트 길이 (이보다 짧으면 패널티 없음)
+        """
+        self.__name__ = "ItemPreferenceMentionReward"
+        self.data_name = data_name
+        self.device = device
+        self.base_reward = base_reward
+        self.length_penalty_alpha = length_penalty_alpha
+        self.min_length = min_length
+        
+        # NLTK stopwords 다운로드 및 로드
+        try:
+            self.stopwords = set(stopwords.words('english'))
+        except LookupError:
+            print("Downloading NLTK stopwords...")
+            nltk.download('stopwords', quiet=True)
+            self.stopwords = set(stopwords.words('english'))
+        
+        # 추가 불용어 (도메인 특화)
+        additional_stopwords = {'none', 'null', 'n/a', 'na'}
+        self.stopwords.update(additional_stopwords)
+        
+        # 아이템 메타데이터 로드
+        print(f"📦 Loading item metadata from {data_dir}/{data_name}/meta_text_fix.json")
+        with open(f"{data_dir}/{data_name}/meta_text_fix.json", "r") as f:
+            item_metadata = json.load(f)
+            item_metadata = {int(k): v for k, v in item_metadata.items()}
+        
+        # 아이템 선호도 정보 로드
+        preference_file = f"{data_processed_dir}/{data_name}_gemma-3-1b-it_item_item_preference.json"
+        print(f"📦 Loading item preference from {preference_file}")
+        with open(preference_file, "r") as f:
+            item_preference = json.load(f)
+            item_preference = {int(k): v for k, v in item_preference.items()}
+        
+        # 각 아이템의 메타데이터 + 선호도 단어 집합을 미리 추출
+        self.item_combined_words = {}
+        for item_id, meta in item_metadata.items():
+            words = set()
+            
+            # 메타데이터에서 단어 추출
+            if "title" in meta and meta["title"]:
+                title_words = self._extract_words(str(meta["title"]))
+                words.update(title_words)
+            
+            if "brand" in meta and meta["brand"]:
+                brand_words = self._extract_words(str(meta["brand"]))
+                words.update(brand_words)
+            
+            # 선호도 정보에서 단어 추출
+            if item_id in item_preference:
+                preference_words = self._extract_words(item_preference[item_id])
+                words.update(preference_words)
+            
+            self.item_combined_words[item_id] = words
+        
+        print(f"✓ ItemPreferenceMentionReward initialized")
+        print(f"  - Loaded metadata for {len(item_metadata)} items")
+        print(f"  - Loaded preference for {len(item_preference)} items")
+        print(f"  - Combined word sets created for {len(self.item_combined_words)} items")
+        print(f"  - Base reward: {self.base_reward}")
+        print(f"  - Length penalty alpha: {self.length_penalty_alpha}")
+        print(f"  - Stopwords excluded: {len(self.stopwords)} (NLTK English + custom)")
+        
+        # 통계 출력
+        if len(self.item_combined_words) > 0:
+            word_counts = [len(words) for words in self.item_combined_words.values()]
+            avg_words = sum(word_counts) / len(word_counts)
+            max_words = max(word_counts)
+            min_words = min(word_counts)
+            print(f"  - Word set statistics: Min={min_words}, Max={max_words}, Avg={avg_words:.1f}")
+    
+    def _extract_words(self, text: str) -> set:
+        """
+        텍스트에서 단어를 추출하고 불용어를 제거
+        
+        Args:
+            text: 입력 텍스트
+            
+        Returns:
+            불용어가 제거된 단어 집합 (소문자)
+        """
+        # 알파벳과 숫자만 남기고 공백으로 구분
+        words = re.findall(r'\b[a-zA-Z0-9]+\b', text.lower())
+        
+        # 불용어 제거 및 길이가 1인 단어 제거
+        filtered_words = {w for w in words if w not in self.stopwords and len(w) > 1}
+        
+        return filtered_words
+    
+    def __call__(
+        self,
+        generated_texts: List[str],
+        targets: List[int],
+        **kwargs
+    ) -> List[float]:
+        """
+        생성된 텍스트에서 타겟 아이템의 메타데이터+선호도 단어 언급도를 평가하여 보상
+        <query> 태그가 있는 경우 태그 내부의 텍스트만 검사
+        
+        Args:
+            generated_texts: [batch_size] 생성된 텍스트
+            targets: [batch_size] 타겟 아이템 ID
+            
+        Returns:
+            rewards: [batch_size] 보상 값
+        """
+        rewards = []
+        
+        for gen_text, target_id in zip(generated_texts, targets):
+            # 타겟 아이템의 메타데이터+선호도 단어
+            target_words = self.item_combined_words.get(target_id, set())
+            
+            if not target_words:
+                rewards.append(0.0)
+                continue
+            
+            # 처리된 텍스트에서 단어 추출
+            gen_words = self._extract_words(gen_text)
+            
+            # 공통 단어가 몇 개나 언급되었는지 카운트
+            matched_words = target_words.intersection(gen_words)
+            match_count = len(matched_words)
+            
+            # 기본 리워드 계산 (언급된 단어 수에 비례)
+            reward = match_count * self.base_reward
+            
+            # 길이 패널티 적용: 생성된 텍스트 길이 기준
+            text_length = len(gen_text.split())
+            if text_length > self.min_length:
+                # length_factor: 텍스트가 길수록 작아짐 (0~1)
+                length_factor = 1.0 / (1.0 + self.length_penalty_alpha * (text_length - self.min_length) / self.min_length)
+                reward = reward * length_factor
+            
+            rewards.append(reward)
+        
+        return rewards
+
+
 class FormatComplianceReward:
     """
     생성된 텍스트가 특정 XML-like 포맷을 준수하는지 확인하는 리워드 함수

@@ -3,12 +3,16 @@
 max_steps=500
 dataset_names=(beauty toys sports yelp)
 rank_file_names=(
-    "results/zeroshot_seq_rec_beauty_train_train_eval_20260120_173119.csv"
-    "results/zeroshot_seq_rec_toys_train_train_eval_20260120_161627.csv"
-    "results/zeroshot_seq_rec_sports_train_train_eval_20260120_191551.csv"
-    "results/zeroshot_seq_rec_yelp_train_train_eval_20260120_211918.csv"
+    # "results/zeroshot_seq_rec_beauty_train_train_eval_20260120_173119.csv"
+    # "results/zeroshot_seq_rec_toys_train_train_eval_20260120_161627.csv"
+    # "results/zeroshot_seq_rec_sports_train_train_eval_20260120_191551.csv"
+    # "results/zeroshot_seq_rec_yelp_train_train_eval_20260120_211918.csv"
+    "results/similarity_retrieval_beauty_train.csv"
+    "results/similarity_retrieval_toys_train.csv"
+    "results/similarity_retrieval_sports_train.csv"
+    "results/similarity_retrieval_yelp_train.csv"
 )
-device=1
+device=2
 PROMPT_TYPE="seq_rec_new"
 PROMPT_TYPE="seq_rec_recent2"
 PROMPT_TYPE="seq_rec_anchor"
@@ -17,7 +21,7 @@ TRACKER="python3 utils/device_tracker.py"
 #!/bin/bash
 
 max_steps=1000
-dataset_names=(beauty toys sports yelp)
+dataset_names=(sports)
 device=6
 PROMPT_TYPE="seq_rec_anchor"
 
@@ -30,9 +34,10 @@ TRACKER="python3 utils/device_tracker.py"
 for seed in 42; do
 for dataset_name in ${dataset_names[@]}; do
     echo "Training ${dataset_name}..."
+    filter_train_csv=${rank_file_names[2]}
 for temp in 0.6 ; do
 for loss_type in dr_grpo; do
-    RUN_NAME="${dataset_name}_${PROMPT_TYPE}_meta0.02_seed${seed}_kd0.001_k1000_${MAX_NEW_TOKENS}_steps${max_steps}_temp${temp}_lr1e-6"
+    RUN_NAME="${dataset_name}_${PROMPT_TYPE}_seed${seed}_kd0.001_k1000_${MAX_NEW_TOKENS}_steps${max_steps}_temp${temp}_lr1e-6"
     CHECKPOINT_DIR="checkpoints/$RUN_NAME"
     FINAL_CHECKPOINT_DIR="$CHECKPOINT_DIR/checkpoint-$max_steps"
 
@@ -70,12 +75,21 @@ for loss_type in dr_grpo; do
         --save_interval $max_steps \
         --device "cuda" \
         --train_vllm_gpu_memory_utilization 0.42 \
-        --use_metadata_reward \
-        --metadata_base_reward 0.02 \
-        --metadata_length_penalty 1.0 \
-        --metadata_min_length 8 \
-        --history_penalty_weight 0.001 \
         "$@"
+        # --filter_train_csv $filter_train_csv \
+        # --rank_min 1 \
+        # --rank_max 100 \
+        # --use_metadata_reward \
+        # --metadata_base_reward 0.01 \
+        # --metadata_length_penalty 0.5 \
+        # --history_penalty_weight 0.001 \
+        # --history_proxy_threshold_reward \
+        # --history_proxy_threshold_coef 0.2 \
+        # --use_metadata_reward \
+        # --metadata_base_reward 0.01 \
+        # --metadata_length_penalty 0.8 \
+        # --metadata_min_length 8 \
+        # --history_penalty_weight 0.001 \
         # --proxy_label_reward \
         # --proxy_k 100 \
         # --proxy_label_coef 1.0 \

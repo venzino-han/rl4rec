@@ -466,8 +466,8 @@ class RecommendationDataset(Dataset):
             rank_min: 최소 rank (None이면 제한 없음)
             rank_max: 최대 rank (None이면 제한 없음)
         """
-        if not os.path.exists(csv_path):
-            raise FileNotFoundError(f"CSV file not found: {csv_path}")
+        # if not os.path.exists(csv_path):
+        #     raise FileNotFoundError(f"CSV file not found: {csv_path}")
         
         print(f"\n{'='*80}")
         print(f"🔍 Filtering dataset by rank range")

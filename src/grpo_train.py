@@ -39,6 +39,7 @@ from utils.reward_function import (
     SimilarHistoryItemMentionReward,
     MetadataMentionReward,
     FormatComplianceReward,
+    ItemPreferenceMentionReward,
 )
 from utils.dataset import create_dataloaders
 from evaluator import RecommendationEvaluator
@@ -336,6 +337,22 @@ class GRPOTrainerWrapper:
                 )
                 reward_funcs.append(format_reward_fn)
             
+            # 7. Item Preference Mention Reward (옵션) - 메타데이터+선호도 결합
+            if args.use_item_preference_reward:
+                print(f"  [7] Item Preference Mention Reward: +{args.item_preference_base_reward} per common word")
+                print(f"      Combines metadata + item preference text from gemma-3-1b-it")
+                print(f"      Length penalty: {args.item_preference_length_penalty}")
+                item_preference_reward_fn = ItemPreferenceMentionReward(
+                    data_name=args.data_name,
+                    device=args.device,
+                    data_dir=args.data_dir,
+                    data_processed_dir=args.data_processed_dir,
+                    base_reward=args.item_preference_base_reward,
+                    length_penalty_alpha=args.item_preference_length_penalty,
+                    min_length=args.item_preference_min_length,
+                )
+                reward_funcs.append(item_preference_reward_fn)
+            
             print(f"  Total reward functions: {len(reward_funcs)}")
             
             # reward_funcs가 1개면 단일 함수로, 2개 이상이면 리스트로 전달
@@ -528,7 +545,7 @@ def parse_args():
     parser.add_argument("--metadata_length_penalty", type=float, default=0.5,
                         help="Length penalty alpha for metadata reward (0.0-1.0). "
                              "Higher values penalize longer texts more (default: 0.5)")
-    parser.add_argument("--metadata_min_length", type=int, default=16,
+    parser.add_argument("--metadata_min_length", type=int, default=32,
                         help="Minimum text length (in words) before length penalty applies (default: 10)")
     parser.add_argument("--history_penalty_weight", type=float, default=0.01,
                         help="Penalty weight for mentioning history metadata words not in target (default: 0.5)")
@@ -548,6 +565,23 @@ def parse_args():
                              "If enabled and tags are out of order, reward is halved.")
     parser.add_argument("--format_case_sensitive", action="store_true",
                         help="Make tag matching case-sensitive (default: False)")
+    
+    # Item Preference Mention Reward (메타데이터 + 선호도 정보 결합)
+    parser.add_argument("--use_item_preference_reward", action="store_true",
+                        help="Use item preference mention reward. "
+                             "Combines metadata (title, brand) with item preference information from gemma-3-1b-it. "
+                             "Rewards mentioning common words between query and target item's combined metadata+preference. "
+                             "Stopwords are automatically filtered using NLTK.")
+    parser.add_argument("--item_preference_base_reward", type=float, default=0.1,
+                        help="Base reward per common word mentioned (default: 0.1)")
+    parser.add_argument("--item_preference_length_penalty", type=float, default=0.5,
+                        help="Length penalty alpha for item preference reward (0.0-1.0). "
+                             "Higher values penalize longer texts more (default: 0.5)")
+    parser.add_argument("--item_preference_min_length", type=int, default=32,
+                        help="Minimum text length (in words) before length penalty applies (default: 10)")
+    parser.add_argument("--data_processed_dir", type=str, default="data_processed",
+                        help="Directory containing processed data files like item preference JSON")
+
 
     
     # Novelty Reward (popularity-based reward)
