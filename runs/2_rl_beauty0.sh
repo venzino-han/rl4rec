@@ -29,8 +29,6 @@ MAX_NEW_TOKENS=128
 
 TRACKER="python3 utils/device_tracker.py"
 
-
-
 for seed in 42; do
 for dataset_name in ${dataset_names[@]}; do
     echo "Training ${dataset_name}..."
@@ -38,7 +36,7 @@ for dataset_name in ${dataset_names[@]}; do
 
 for temp in 0.6 ; do
 for loss_type in dr_grpo; do
-    RUN_NAME="${dataset_name}_${PROMPT_TYPE}_rank20_seed${seed}_kd0.001_k1000_${MAX_NEW_TOKENS}_steps${max_steps}_temp${temp}_lr1e-6"
+    RUN_NAME="${dataset_name}_${PROMPT_TYPE}_rank100_meta0.1_seed${seed}_kd0.001_k1000_${MAX_NEW_TOKENS}_steps${max_steps}_temp${temp}_lr1e-6"
     CHECKPOINT_DIR="checkpoints/$RUN_NAME"
     FINAL_CHECKPOINT_DIR="$CHECKPOINT_DIR/checkpoint-$max_steps"
 
@@ -75,11 +73,15 @@ for loss_type in dr_grpo; do
         --eval_interval 5000 \
         --save_interval $max_steps \
         --device "cuda" \
-        --train_vllm_gpu_memory_utilization 0.42 \
-        --filter_train_csv $filter_train_csv \
-        --rank_min 1 \
-        --rank_max 20 \
+        --train_vllm_gpu_memory_utilization 0.45 \
+        --use_similar_history_reward \
+        --brand_reward_weight 0.05 \
+        --title_reward_weight 0.1 \
         "$@"
+        # --emb_type item_preference_1024_gemma-3-4b-it \
+        # --filter_train_csv $filter_train_csv \
+        # --rank_min 1 \
+        # --rank_max 20 \
         # --use_metadata_reward \
         # --metadata_base_reward 0.01 \
         # --metadata_length_penalty 0.8 \
