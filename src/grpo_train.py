@@ -202,10 +202,11 @@ class GRPOTrainerWrapper:
                 eval_steps=args.eval_interval,
                 save_steps=args.save_interval,
                 save_total_limit=args.save_total_limit,
+                dataloader_num_workers=16,
                 
                 max_grad_norm=args.max_grad_norm,
                 seed=args.seed,
-                bf16=args.bf16,
+                bf16=True,
                 report_to=args.report_to if args.report_to != "none" else None,
                 run_name=args.run_name,
                 beta=args.reference_model_kld_coef,
@@ -288,26 +289,28 @@ class GRPOTrainerWrapper:
                     device=args.device,
                     use_position_weight=args.similar_history_position_weight,
                     position_decay=args.similar_history_position_decay,
+                    title_reward_weight=args.title_reward_weight,
+                    brand_reward_weight=args.brand_reward_weight,
                 )
                 reward_funcs.append(similar_history_reward_fn)
             
-            # 3. Brand Mention Reward (옵션)
-            if args.use_brand_reward:
-                print(f"  [3] Brand Mention Reward: +0.5 for mentioning target brand")
-                brand_reward_fn = BrandMentionReward(
-                    data_name=args.data_name,
-                    device=args.device,
-                )
-                reward_funcs.append(brand_reward_fn)
+            # # 3. Brand Mention Reward (옵션)
+            # if args.use_brand_reward:
+            #     print(f"  [3] Brand Mention Reward: +0.5 for mentioning target brand")
+            #     brand_reward_fn = BrandMentionReward(
+            #         data_name=args.data_name,
+            #         device=args.device,
+            #     )
+            #     reward_funcs.append(brand_reward_fn)
             
-            # 4. Category Mention Reward (옵션)
-            if args.use_category_reward:
-                print(f"  [4] Category Mention Reward: +0.5 for mentioning target category")
-                category_reward_fn = CategoryMentionReward(
-                    data_name=args.data_name,
-                    device=args.device,
-                )
-                reward_funcs.append(category_reward_fn)
+            # # 4. Category Mention Reward (옵션)
+            # if args.use_category_reward:
+            #     print(f"  [4] Category Mention Reward: +0.5 for mentioning target category")
+            #     category_reward_fn = CategoryMentionReward(
+            #         data_name=args.data_name,
+            #         device=args.device,
+            #     )
+            #     reward_funcs.append(category_reward_fn)
             
             # 5. Metadata Mention Reward (옵션) - 통합 메타데이터 리워드
             if args.use_metadata_reward:
@@ -494,7 +497,7 @@ def parse_args():
                         help="Number of top-K SASRec recommendations to include in prompt")
     
     # GRPO Training
-    parser.add_argument("--loss_type", type=str, default="grpo")
+    parser.add_argument("--loss_type", type=str, default="dr_grpo")
     parser.add_argument("--learning_rate", type=float, default=1e-6)
     parser.add_argument("--batch_size", type=int, default=32)
     parser.add_argument("--eval_batch_size", type=int, default=64)
@@ -504,8 +507,7 @@ def parse_args():
     parser.add_argument("--max_grad_norm", type=float, default=1.0)
     parser.add_argument("--num_epochs", type=int, default=3)
     parser.add_argument("--max_steps", type=int, default=5000)
-    parser.add_argument("--bf16", action="store_true", help="Use bfloat16")
-    parser.add_argument("--train_temperature", type=float, default=0.1)
+    parser.add_argument("--train_temperature", type=float, default=0.6)
     parser.add_argument("--reference_model_kld_coef", type=float, default=0.0)
     parser.add_argument("--importance_sampling_level", type=str, default="token", choices=["token", "sequence"])
 
@@ -528,12 +530,10 @@ def parse_args():
                              "0.0 = no decay (position-independent), "
                              "1.0 = full decay (reward becomes 0 at text end). "
                              "Default: 0.5 (reward halves at text end)")
-    parser.add_argument("--use_brand_reward", action="store_true",
-                        help="Use reward for mentioning target item's brand. "
-                             "Reward: +0.5 for mentioning the brand.")
-    parser.add_argument("--use_category_reward", action="store_true",
-                        help="Use reward for mentioning target item's category. "
-                             "Reward: +0.5 for mentioning any part of the category.")
+    parser.add_argument("--brand_reward_weight", type=float, default=0.5,
+                        help="Brand reward weight for similar history reward (default: 0.5)")
+    parser.add_argument("--title_reward_weight", type=float, default=1.0,
+                        help="Title reward weight for similar history reward (default: 1.0)")
     
     # Metadata Mention Reward (통합 메타데이터 리워드)
     parser.add_argument("--use_metadata_reward", action="store_true",

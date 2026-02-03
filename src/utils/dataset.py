@@ -411,7 +411,7 @@ class RecommendationDataset(Dataset):
             )
 
         # print sample prompts
-        for user_id in [10, 20, 30]:
+        for user_id in [10]:
             print(f"User {user_id}: \n{self.prompt_dict[user_id]}")
             print("-" * 100)
         

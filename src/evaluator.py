@@ -159,7 +159,8 @@ class RecommendationEvaluator:
                 
                 self.emb_llm = LLM(
                     model=emb_model_name,
-                    task="embed",
+                    # task="embed",
+                    runner="pooling",
                     enforce_eager=True,
                     gpu_memory_utilization=self.args.gpu_memory_utilization,
                     trust_remote_code=True,

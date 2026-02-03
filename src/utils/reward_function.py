@@ -608,6 +608,12 @@ class SimilarHistoryItemMentionReward:
         use_position_weight: bool = False,
         position_decay: float = 1.0,
         similarity_threshold: float = 0.7,
+        title_reward_weight: float = 1.0,
+        brand_reward_weight: float = 0.5,
+        head_range: int = 8,
+        # time_window_days: int = -1,
+        time_window_days: int = 60,
+        decay_ratio: float = 0.7,
     ):
         """
         Args:
@@ -624,6 +630,8 @@ class SimilarHistoryItemMentionReward:
                           예: 0.5이면 텍스트 끝에서 보상이 절반으로 감소
             similarity_threshold: 유사도 역치 (0.0 ~ 1.0)
                                 이 값 이하이면 마지막 상호작용 아이템을 선택
+            time_window_days: 최근 N일 이내의 구매 기록만 anchor 후보로 사용
+            decay_ratio: head_range 이후 단어 위치마다 곱해지는 감쇠율 (예: 0.95)
         """
         self.__name__ = "SimilarHistoryItemMentionReward"
         self.data_name = data_name
@@ -632,13 +640,42 @@ class SimilarHistoryItemMentionReward:
         self.use_position_weight = use_position_weight
         self.position_decay = position_decay
         self.similarity_threshold = similarity_threshold
+        self.time_window_days = time_window_days
         
+        self.title_reward_weight = title_reward_weight
+        self.brand_reward_weight = brand_reward_weight
+        self.head_range = head_range
+        self.decay_ratio = decay_ratio
+
         # 아이템 메타데이터 로드 (title, brand, category)
         with open(f"{data_dir}/{data_name}/meta_text_fix.json", "r") as f:
             self.item_metadata = json.load(f)
         
         print(f"✓ SimilarHistoryItemMentionReward initialization started")
         print(f"  - Loaded metadata for {len(self.item_metadata)} items")
+        
+        # time_window_days가 -1이 아닐 때만 타임스탬프 정보 로드
+        if self.time_window_days != -1:
+            print(f"  - Loading user2reviews_with_date.json...")
+            with open(f"{data_dir}/{data_name}/user2reviews_with_date.json", "r") as f:
+                user_reviews = json.load(f)
+            
+            # user_id -> {item_id: timestamp} 매핑 생성
+            self.user_item_timestamps = {}
+            for user_id_str, reviews in user_reviews.items():
+                user_id = int(user_id_str)
+                self.user_item_timestamps[user_id] = {}
+                for review in reviews:
+                    item_id = int(review['item_id'])
+                    timestamp = review['timestamp']
+                    self.user_item_timestamps[user_id][item_id] = timestamp
+            
+            print(f"  - Loaded timestamp data for {len(self.user_item_timestamps)} users")
+            print(f"  - Time window: {self.time_window_days} days")
+        else:
+            self.user_item_timestamps = None
+            print(f"  - Time window: DISABLED (using all history)")
+        
         print(f"  - Similarity threshold: {self.similarity_threshold}")
         print(f"    → If max similarity < threshold, use last interacted item")
         if self.use_position_weight:
@@ -663,6 +700,7 @@ class SimilarHistoryItemMentionReward:
     ):
         """
         전체 데이터에 대해 타겟과 가장 유사한 히스토리 아이템을 미리 계산
+        time_window_days가 -1이 아니면 최근 N일 이내의 히스토리 아이템만 고려
         유사도가 역치 이하이면 마지막 상호작용 아이템을 선택
         
         Args:
@@ -677,6 +715,13 @@ class SimilarHistoryItemMentionReward:
         normalized_embeddings = torch.nn.functional.normalize(self.item_embeddings, p=2, dim=1)
         
         fallback_count = 0  # 역치 미만으로 마지막 아이템 사용한 횟수
+        time_filtered_count = 0  # 시간 필터링으로 히스토리가 줄어든 횟수
+        no_recent_items_count = 0  # 60일 이내 아이템이 없어서 전체 히스토리 마지막 아이템 사용
+        
+        # time_window_days == -1이면 시간 필터링 비활성화
+        use_time_filter = (self.time_window_days != -1)
+        if use_time_filter:
+            time_window_seconds = self.time_window_days * 24 * 60 * 60
         
         with open(sequential_file, 'r') as f:
             for line in f:
@@ -693,11 +738,52 @@ class SimilarHistoryItemMentionReward:
                 if len(history) == 0:
                     continue
                 
+                # 시간 필터링 사용 여부에 따라 분기
+                if use_time_filter:
+                    # 타겟 아이템의 타임스탬프 가져오기
+                    if user_id not in self.user_item_timestamps:
+                        continue
+                    
+                    user_timestamps = self.user_item_timestamps[user_id]
+                    if target_id not in user_timestamps:
+                        continue
+                    
+                    target_timestamp = int(user_timestamps[target_id])
+                    
+                    # 최근 time_window_days 이내의 히스토리 아이템만 필터링
+                    filtered_history = []
+                    for item_id in history:
+                        if item_id in user_timestamps:
+                            item_timestamp = int(user_timestamps[item_id])
+                            # 타겟보다 이전이고, time_window 이내인 아이템만 포함
+                            if item_timestamp < target_timestamp:
+                                time_diff = target_timestamp - item_timestamp
+                                if time_diff <= time_window_seconds:
+                                    filtered_history.append(item_id)
+                    
+                    # 필터링된 히스토리가 비어있으면 전체 히스토리의 마지막 아이템 사용
+                    if len(filtered_history) == 0:
+                        selected_item_id = history[-1]
+                        max_similarity = 0.0  # 시간 필터링으로 인한 fallback
+                        self.similarity_cache[user_id] = (selected_item_id, max_similarity)
+                        no_recent_items_count += 1
+                        continue
+                    
+                    # 필터링 통계
+                    if len(filtered_history) < len(history):
+                        time_filtered_count += 1
+                    
+                    # 필터링된 히스토리 사용
+                    working_history = filtered_history
+                else:
+                    # 시간 필터링 없이 전체 히스토리 사용
+                    working_history = history
+                
                 # 타겟 임베딩 (정규화됨)
                 target_emb = normalized_embeddings[target_id]  # [emb_dim]
                 
                 # 히스토리 임베딩 (정규화됨)
-                history_ids = torch.tensor(history, dtype=torch.long, device=self.device)
+                history_ids = torch.tensor(working_history, dtype=torch.long, device=self.device)
                 history_embs = normalized_embeddings[history_ids]  # [history_len, emb_dim]
                 
                 # 코사인 유사도 계산
@@ -709,10 +795,10 @@ class SimilarHistoryItemMentionReward:
                 
                 # 유사도가 역치 이하이면 마지막 상호작용 아이템 선택
                 if max_similarity < self.similarity_threshold:
-                    selected_item_id = history[-1]  # 마지막 아이템
+                    selected_item_id = working_history[-1]  # 마지막 아이템
                     fallback_count += 1
                 else:
-                    selected_item_id = history[most_similar_idx]
+                    selected_item_id = working_history[most_similar_idx]
                 
                 # 캐시에 저장 (아이템 ID와 최대 유사도)
                 self.similarity_cache[user_id] = (selected_item_id, max_similarity)
@@ -721,7 +807,14 @@ class SimilarHistoryItemMentionReward:
         total_users = len(self.similarity_cache)
         if total_users > 0:
             fallback_ratio = (fallback_count / total_users) * 100
-            print(f"  - Fallback to last item: {fallback_count}/{total_users} ({fallback_ratio:.1f}%)")
+            if use_time_filter:
+                time_filtered_ratio = (time_filtered_count / total_users) * 100
+                no_recent_ratio = (no_recent_items_count / total_users) * 100
+                print(f"  - Time-filtered history: {time_filtered_count}/{total_users} ({time_filtered_ratio:.1f}%)")
+                print(f"  - No recent items (use last item): {no_recent_items_count}/{total_users} ({no_recent_ratio:.1f}%)")
+                print(f"  - Fallback to last item (within time window): {fallback_count}/{total_users} ({fallback_ratio:.1f}%)")
+            else:
+                print(f"  - Fallback to last item: {fallback_count}/{total_users} ({fallback_ratio:.1f}%)")
 
     
     def _get_most_similar_history_item(
@@ -743,19 +836,19 @@ class SimilarHistoryItemMentionReward:
         selected_item_id, _ = self.similarity_cache[user_id]
         return selected_item_id
     
-    def _get_first_three_words(self, title: str) -> str:
+    def _get_first_n_words(self, title: str, n: int) -> str:
         """
-        Title의 첫 3단어 추출
+        Title의 첫 n단어 추출
         
         Args:
             title: 아이템 title
             
         Returns:
-            first_three_words: 첫 3단어를 공백으로 연결한 문자열 (소문자)
+            first_n_words: 첫 n단어를 공백으로 연결한 문자열 (소문자)
         """
         words = title.strip().split()
-        first_three = " ".join(words[:3])
-        return first_three.lower()
+        first_n_words = " ".join(words[:n])
+        return first_n_words.lower()
     
     def _calculate_position_weight(self, position: int, text_length: int) -> float:
         """
@@ -795,6 +888,11 @@ class SimilarHistoryItemMentionReward:
         생성된 텍스트에서 유사한 히스토리 아이템의 title 언급 여부를 확인하여 보상
         <query> 태그가 있는 경우 태그 내부의 텍스트만 검사
         
+        보상 감쇠 로직:
+        - head_range 이내에 언급: 보상 감쇠 없이 적용
+        - head_range 이후에 언급: 단어 위치마다 decay_ratio를 곱한 지수 감소
+          weight = decay_ratio ^ (word_position - head_range)
+        
         Args:
             generated_texts: [batch_size] 생성된 텍스트
             targets: [batch_size] 타겟 아이템 ID
@@ -803,8 +901,8 @@ class SimilarHistoryItemMentionReward:
             
         Returns:
             rewards: [batch_size] 보상 값
-                    - use_position_weight=False: 0 또는 1.0
-                    - use_position_weight=True: 0 ~ 1.0 (위치에 따라 가중)
+                    - head_range 이내: 0 또는 full reward (title_reward_weight, brand_reward_weight)
+                    - head_range 이후: 단어 위치에 따라 지수 감소
         """
         rewards = []
         
@@ -820,20 +918,44 @@ class SimilarHistoryItemMentionReward:
             # 해당 아이템의 title 가져오기
             if str(most_similar_item_id) in self.item_metadata:
                 item_title = self.item_metadata[str(most_similar_item_id)]["title"]
-                first_three_words = self._get_first_three_words(item_title)
-                
-                # 처리된 텍스트에 첫 3단어가 포함되어 있는지 확인 (대소문자 무시)
+                item_brand = self.item_metadata[str(most_similar_item_id)]["brand"]
+                first_n_words = self._get_first_n_words(item_title, 3).lower()
+                first_n_brand = self._get_first_n_words(item_brand, 3).lower()
+
+                # 전체 텍스트에서 언급 위치 확인
                 processed_text_lower = processed_text.lower()
-                if first_three_words in processed_text_lower:
-                    if self.use_position_weight:
-                        # 위치 기반 가중치 적용
-                        position = processed_text_lower.find(first_three_words)
-                        text_length = len(processed_text_lower)
-                        weight = self._calculate_position_weight(position, text_length)
-                        reward = 1.0 * weight
+                
+                # Title 언급 확인
+                title_position = processed_text_lower.find(first_n_words)
+                if title_position != -1:
+                    # 문자 위치를 단어 위치로 변환
+                    words_before_title = processed_text_lower[:title_position].split()
+                    word_position = len(words_before_title)
+                    
+                    if word_position < self.head_range:
+                        # head_range 이내: 감쇠 없음
+                        title_weight = 1.0
                     else:
-                        # 위치 무관하게 1.0점
-                        reward = 1.0
+                        # head_range 이후: 지수 감소
+                        words_after_head = word_position - self.head_range
+                        title_weight = self.decay_ratio ** words_after_head
+                    reward += self.title_reward_weight * title_weight
+                
+                # Brand 언급 확인
+                brand_position = processed_text_lower.find(first_n_brand)
+                if brand_position != -1:
+                    # 문자 위치를 단어 위치로 변환
+                    words_before_brand = processed_text_lower[:brand_position].split()
+                    word_position = len(words_before_brand)
+                    
+                    if word_position < self.head_range:
+                        # head_range 이내: 감쇠 없음
+                        brand_weight = 1.0
+                    else:
+                        # head_range 이후: 지수 감소
+                        words_after_head = word_position - self.head_range
+                        brand_weight = self.decay_ratio ** words_after_head
+                    reward += self.brand_reward_weight * brand_weight
             
             rewards.append(reward)
         
