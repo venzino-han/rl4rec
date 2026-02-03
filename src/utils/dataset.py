@@ -51,6 +51,8 @@ class PromptGenerator:
         use_sasrec: bool = False,
         sasrec_top_k: int = 5,
         use_relative_date: bool = False,
+        trigger_items: Optional[Dict[int, int]] = None,
+        trigger_emphasis_text: Optional[str] = None,
     ):
         """
         Args:
@@ -93,6 +95,8 @@ class PromptGenerator:
         self.use_sasrec = use_sasrec
         self.sasrec_top_k = sasrec_top_k
         self.use_relative_date = use_relative_date
+        self.trigger_items = trigger_items or {}
+        self.trigger_emphasis_text = trigger_emphasis_text
         
         # 데이터셋에 따라 적절한 프롬프트 템플릿 선택
         if data_name == 'yelp':
@@ -128,7 +132,7 @@ class PromptGenerator:
         if self.use_sasrec and data_name:
             print(f"🔍 SASRec recommendations will be loaded per split in RecommendationDataset")
     
-    def generate_prompt(self, item_ids: List[int], user_id: Optional[int] = None, target_item_id: Optional[int] = None, sasrec_items: Optional[List[int]] = None) -> str:
+    def generate_prompt(self, item_ids: List[int], user_id: Optional[int] = None, target_item_id: Optional[int] = None, sasrec_items: Optional[List[int]] = None, trigger_item_id: Optional[int] = None) -> str:
         """
         사용자 시퀀스로부터 프롬프트 생성
         
@@ -138,6 +142,7 @@ class PromptGenerator:
             target_timestamp: 타겟 타임스탬프 (days_filter 적용시 기준, 선택적)
             target_item_id: 타겟/레이블 아이템 ID (타겟 날짜 포함용, 선택적)
             sasrec_items: SASRec 추천 아이템 ID 리스트 (선택적)
+            trigger_item_id: Trigger 아이템 ID (강조할 아이템, 선택적)
         
         Returns:
             생성된 프롬프트 문자열
@@ -166,6 +171,7 @@ class PromptGenerator:
         
         # 각 아이템 처리
         for idx, item_id in enumerate(item_ids):
+            # print(type(item_id))
             item_data = self.item_metadata.get(item_id)
             if item_data is None:
                 # 메타데이터가 없는 경우 스킵
@@ -226,6 +232,10 @@ class PromptGenerator:
                     review_text = " ".join(review_text.split()[:self.history_text_max_length])
                 if review_text:
                     item_history_text += f"Review:\n{review_text}\n"
+            
+            # Trigger item 강조 텍스트 추가
+            if trigger_item_id is not None and item_id == trigger_item_id and self.trigger_emphasis_text:
+                item_history_text += f"**Note:** {self.trigger_emphasis_text}\n"
             
             history_text_list.append(item_history_text)
         
@@ -403,11 +413,15 @@ class RecommendationDataset(Dataset):
             # SASRec 추천 결과 가져오기 (있는 경우)
             sasrec_items = self.sasrec_predictions.get(user_id, []) if self.prompt_generator.use_sasrec else None
             
+            # Trigger item 가져오기 (있는 경우)
+            trigger_item_id = self.prompt_generator.trigger_items.get(user_id, None)
+            
             self.prompt_dict[user_id] = self.prompt_generator.generate_prompt(
                 history, 
                 user_id=user_id, 
                 target_item_id=target_item_id,
                 sasrec_items=sasrec_items,
+                trigger_item_id=trigger_item_id,
             )
 
         # print sample prompts
@@ -588,7 +602,7 @@ def load_item_metadata(data_name: str, data_dir: str = "data") -> Dict:
     """
     # 메타데이터 파일 경로 시도
     possible_paths = [
-        f"{data_dir}/{data_name}/meta_text.json",
+        f"{data_dir}/{data_name}/meta_text_fix.json",
     ]
     
     item_metadata = {}
@@ -596,17 +610,8 @@ def load_item_metadata(data_name: str, data_dir: str = "data") -> Dict:
     for path in possible_paths:
         if os.path.exists(path):
             print(f"Loading item metadata from: {path}")
-            
-            if path.endswith('.json'):
-                with open(path, 'r') as f:
-                    data = json.load(f)
-                    # Key를 int로 변환
-                    item_metadata = {int(k): v for k, v in data.items()}
-            elif path.endswith('.pkl'):
-                with open(path, 'rb') as f:
-                    item_metadata = pickle.load(f)
-            
-            print(f"✓ Loaded {len(item_metadata)} items")
+            data = json.load(open(path, 'r'))
+            item_metadata = {int(k): v for k, v in data.items()}
             return item_metadata
     
     # 메타데이터 파일을 찾지 못한 경우 경고
@@ -618,12 +623,22 @@ def create_dataloaders(
     args: argparse.Namespace,
     tokenizer: Optional = None,
     apply_chat_template: bool = True,
+    trigger_items_train: Optional[Dict[int, int]] = None,
+    trigger_items_valid: Optional[Dict[int, int]] = None,
+    trigger_items_test: Optional[Dict[int, int]] = None,
+    trigger_emphasis_text: Optional[str] = None,
 ) -> Tuple[DataLoader, DataLoader, DataLoader, PromptGenerator, Dict]:
     """
     Train/Valid/Test DataLoader 생성
     
     Args:
         args: argparse.Namespace
+        tokenizer: Tokenizer instance
+        apply_chat_template: Whether to apply chat template
+        trigger_items_train: {user_id: trigger_item_id} for train split
+        trigger_items_valid: {user_id: trigger_item_id} for valid split
+        trigger_items_test: {user_id: trigger_item_id} for test split
+        trigger_emphasis_text: Text to emphasize trigger item
     
     Returns:
         (train_dataloader, valid_dataloader, test_dataloader, prompt_generator, item_metadata)
@@ -668,7 +683,8 @@ def create_dataloaders(
     # use_relative_date 파라미터 가져오기 (args에 있으면 사용, 없으면 False)
     use_relative_date = getattr(args, 'use_relative_date', False)
     
-    prompt_generator = PromptGenerator(
+    # Create separate prompt generators for each split to handle trigger_items
+    prompt_generator_train = PromptGenerator(
         item_metadata=item_metadata,
         data_name=args.data_name,
         prompt_type=prompt_type,
@@ -686,6 +702,52 @@ def create_dataloaders(
         use_sasrec=use_sasrec,
         sasrec_top_k=sasrec_top_k,
         use_relative_date=use_relative_date,
+        trigger_items=trigger_items_train,
+        trigger_emphasis_text=trigger_emphasis_text,
+    )
+    
+    prompt_generator_valid = PromptGenerator(
+        item_metadata=item_metadata,
+        data_name=args.data_name,
+        prompt_type=prompt_type,
+        use_brand=args.use_brand,
+        use_category=args.use_category,
+        use_description=args.use_description,
+        use_date=use_date,
+        max_history_len=args.max_history_len,
+        history_text_max_length=args.history_text_max_length,
+        days_filter=days_filter,
+        tokenizer=tokenizer,
+        apply_chat_template=apply_chat_template,
+        emphasize_recent_item=emphasize_recent_item,
+        include_target_date=include_target_date,
+        use_sasrec=use_sasrec,
+        sasrec_top_k=sasrec_top_k,
+        use_relative_date=use_relative_date,
+        trigger_items=trigger_items_valid,
+        trigger_emphasis_text=trigger_emphasis_text,
+    )
+    
+    prompt_generator_test = PromptGenerator(
+        item_metadata=item_metadata,
+        data_name=args.data_name,
+        prompt_type=prompt_type,
+        use_brand=args.use_brand,
+        use_category=args.use_category,
+        use_description=args.use_description,
+        use_date=use_date,
+        max_history_len=args.max_history_len,
+        history_text_max_length=args.history_text_max_length,
+        days_filter=days_filter,
+        tokenizer=tokenizer,
+        apply_chat_template=apply_chat_template,
+        emphasize_recent_item=emphasize_recent_item,
+        include_target_date=include_target_date,
+        use_sasrec=use_sasrec,
+        sasrec_top_k=sasrec_top_k,
+        use_relative_date=use_relative_date,
+        trigger_items=trigger_items_test,
+        trigger_emphasis_text=trigger_emphasis_text,
     )
     
     # 데이터셋 생성
@@ -696,7 +758,7 @@ def create_dataloaders(
     train_dataset = RecommendationDataset(
         data_name=args.data_name,
         item_metadata=item_metadata,
-        prompt_generator=prompt_generator,
+        prompt_generator=prompt_generator_train,
         split="train",
         num_negs=num_negs,
         num_items=num_items,
@@ -713,7 +775,7 @@ def create_dataloaders(
     valid_dataset = RecommendationDataset(
         data_name=args.data_name,
         item_metadata=item_metadata,
-        prompt_generator=prompt_generator,
+        prompt_generator=prompt_generator_valid,
         split="valid",
         num_negs=num_negs,
         num_items=num_items,
@@ -745,7 +807,7 @@ def create_dataloaders(
     test_dataset = RecommendationDataset(
         data_name=args.data_name,
         item_metadata=item_metadata,
-        prompt_generator=prompt_generator,
+        prompt_generator=prompt_generator_test,
         split="test",
         num_negs=num_negs,
         num_items=num_items,
@@ -771,6 +833,7 @@ def create_dataloaders(
     if num_negs > 0:
         print(f"  Negative samples per user: {num_negs}")
     
-    return train_dataset, valid_dataset, test_dataset, prompt_generator, item_metadata
+    # Return test prompt_generator as the primary one
+    return train_dataset, valid_dataset, test_dataset, prompt_generator_test, item_metadata
     # return train_dataloader, valid_dataloader, test_dataloader, prompt_generator, item_metadata
 

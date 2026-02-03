@@ -191,6 +191,22 @@ class GRPOTrainerWrapper:
                 print(f"✓ Wandb initialized with all args")
 
             # GRPO Config
+            # vLLM 모드 결정: 서버 모드 또는 colocate 모드
+            vllm_mode = "server" if args.use_vllm_server else "colocate"
+            vllm_max_model_length=args.max_length+args.max_new_tokens
+            
+            print(f"🔧 vLLM Mode: {vllm_mode}")
+            if args.use_vllm_server:
+                print(f"   vLLM Server URL: {args.vllm_server_url}")
+                print(f"   Training GPU ID: {args.train_gpu_id}")
+                args.vllm_gpu_memory_utilization = None
+                args.vllm_max_model_length = None
+                args.vllm_enable_sleep_mode = None
+                args.vllm_importance_sampling_correction = None
+                args.vllm_importance_sampling_mode = None
+                args.vllm_importance_sampling_cap = None
+                args.vllm_max_model_length = None
+            
             grpo_config = GRPOConfig(
                 output_dir=args.checkpoint_dir,
                 num_train_epochs=args.num_epochs,
@@ -235,9 +251,9 @@ class GRPOTrainerWrapper:
 
                 # vLLM
                 use_vllm=True,
-                vllm_mode="colocate",
+                vllm_mode=vllm_mode,
                 vllm_gpu_memory_utilization=args.train_vllm_gpu_memory_utilization,
-                vllm_max_model_length=args.max_length+args.max_new_tokens,
+                vllm_max_model_length=vllm_max_model_length,
                 vllm_enable_sleep_mode=False,
                 
                 vllm_importance_sampling_correction=True,
@@ -707,6 +723,17 @@ def parse_args():
     parser.add_argument("--eval_emb_max_length", type=int, default=512)
     parser.add_argument("--eval_samples", type=int, default=100000)
     parser.add_argument("--dummy_generation", action="store_true", help="Use dummy generation")
+    
+    # vLLM Server Mode (for separate GPU execution)
+    parser.add_argument("--use_vllm_server", action="store_true",
+                        help="Use external vLLM server instead of colocated vLLM. "
+                             "This allows running vLLM on a separate GPU.")
+    parser.add_argument("--vllm_server_url", type=str, default="http://localhost:8000",
+                        help="URL of the vLLM server (default: http://localhost:8000)")
+    parser.add_argument("--vllm_gpu_id", type=int, default=0,
+                        help="GPU ID for vLLM server (used in startup script)")
+    parser.add_argument("--train_gpu_id", type=int, default=1,
+                        help="GPU ID for GRPO training (used when use_vllm_server is enabled)")
     
     # Rank-based filtering for training
     parser.add_argument("--filter_train_csv", type=str, default=None,
