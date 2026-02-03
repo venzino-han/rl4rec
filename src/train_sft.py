@@ -10,9 +10,6 @@ import gc
 
 from transformers import (
     AutoModelForCausalLM, 
-    AutoTokenizer, 
-    Gemma3TextModel,
-    Gemma3Model,
     Gemma3ForCausalLM,
     BitsAndBytesConfig, 
 )
@@ -95,6 +92,43 @@ def remove_prefix_from_target_text(target_text):
         return " ".join(target_text.split(":")[-1:])
     else:
         return target_text
+
+def load_trigger_items(trigger_items_dir: str, data_name: str, split: str = "train") -> Dict[int, int]:
+    """
+    Load trigger items from JSON file
+    
+    Args:
+        trigger_items_dir: Directory containing trigger items files
+        data_name: Dataset name (e.g., 'beauty', 'toys')
+        split: Dataset split ('train', 'val', 'test')
+    
+    Returns:
+        trigger_items_dict: {user_id: trigger_item_id} dictionary
+    """
+    # Convert 'valid' to 'val' for file naming
+    file_split = 'val' if split == 'valid' else split
+    
+    trigger_file = f"{trigger_items_dir}/SASRec_{data_name}_{file_split}_trigger_items.json"
+    print(f"📌 Loading trigger items from: {trigger_file}")
+    
+    if not os.path.exists(trigger_file):
+        print(f"⚠️  Warning: Trigger items file not found: {trigger_file}")
+        return {}
+    
+    with open(trigger_file, 'r') as f:
+        trigger_items = json.load(f)
+    
+    # Convert keys to int
+    trigger_items_dict = {int(k): int(v) for k, v in trigger_items.items()}
+    print(f"✓ Loaded trigger items for {len(trigger_items_dict)} users")
+    
+    # Show sample
+    if len(trigger_items_dict) > 0:
+        sample_users = list(trigger_items_dict.items())[:3]
+        print(f"  Sample: {sample_users}")
+    
+    return trigger_items_dict
+
 
 def load_target_text_from_file(args, split="train"):
     """
@@ -531,6 +565,16 @@ def parse_arguments():
     parser.add_argument("--prepend_last_item", action="store_true",
                         help="Prepend last purchased item to generated text during evaluation")
     
+    # Trigger items settings
+    parser.add_argument("--use_trigger_items", action="store_true",
+                        help="Use trigger items to emphasize key items in prompt")
+    parser.add_argument("--trigger_items_dir", type=str, 
+                        default="sasrec_results/trigger_items_from_sequential",
+                        help="Directory containing trigger items JSON files")
+    parser.add_argument("--trigger_emphasis_text", type=str,
+                        default="This item was particularly influential in shaping the user's preferences.",
+                        help="Text to add after trigger item to emphasize its importance")
+    
     # Rank-based filtering for training
     parser.add_argument("--filter_train_csv", type=str, default=None,
                         help="Path to evaluation CSV file for filtering train set by rank")
@@ -569,6 +613,17 @@ def main():
     print(f"\n📚 Loading tokenizer: {args.model_name}")
     tokenizer = initialize_tokenizer(args.model_name)
     
+    # Trigger items 로드 (옵션)
+    trigger_items_train = None
+    trigger_items_valid = None
+    trigger_items_test = None
+    
+    if args.use_trigger_items:
+        print(f"\n📌 Loading trigger items...")
+        trigger_items_train = load_trigger_items(args.trigger_items_dir, args.data_name, split="train")
+        trigger_items_valid = load_trigger_items(args.trigger_items_dir, args.data_name, split="valid")
+        trigger_items_test = load_trigger_items(args.trigger_items_dir, args.data_name, split="test")
+    
     # 데이터로더 생성 (create_dataloaders 함수 사용)
     print(f"\n📊 Creating datasets...")
     (
@@ -577,7 +632,15 @@ def main():
         test_dataset,
         prompt_generator,
         item_metadata,
-    ) = create_dataloaders(args, tokenizer=tokenizer, apply_chat_template=True)
+    ) = create_dataloaders(
+        args, 
+        tokenizer=tokenizer, 
+        apply_chat_template=True,
+        trigger_items_train=trigger_items_train,
+        trigger_items_valid=trigger_items_valid,
+        trigger_items_test=trigger_items_test,
+        trigger_emphasis_text=args.trigger_emphasis_text if args.use_trigger_items else None,
+    )
     
     # 타겟 텍스트 생성
     print(f"\n📝 Generating target text (target_type={args.target_type})...")
